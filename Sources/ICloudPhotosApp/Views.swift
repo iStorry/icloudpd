@@ -382,17 +382,16 @@ struct DownloadView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .transition(.opacity)
             } else {
-                sidebar
+                AppSidebar()
                     .transition(.opacity)
                 Group {
-                    if isActive { runStage } else { readyStage }
+                    if model.page == .activity { activityStage } else { HomeStage(showingAlbums: $showingAlbums) }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .transition(.opacity)
             }
         }
         .padding(12)
-        .animation(.smooth(duration: 0.3), value: isActive)
         .animation(.smooth(duration: 0.22), value: model.page)
         .sheet(isPresented: $showingAlbums) {
             AlbumPicker().environmentObject(model)
@@ -406,188 +405,28 @@ struct DownloadView: View {
         }
     }
 
-    /// A run is going, or its results are still on screen.
-    private var isActive: Bool { model.isDownloading || model.hasRun }
+    // MARK: Activity
 
-    // MARK: Sidebar
-
-    private var sidebar: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            accountHeader
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        SectionHeader(title: "Save to")
-                        Card {
-                            CardRow {
-                                Image(systemName: "folder.fill").foregroundStyle(Theme.accentSoft)
-                                Text(model.directory.map { ($0.path as NSString).abbreviatingWithTildeInPath } ?? "No folder chosen")
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                                    .foregroundStyle(model.directory == nil ? Theme.secondary : Color.primary)
-                                Spacer(minLength: 4)
-                                if model.directory != nil {
-                                    Button("Show") { model.openDirectory() }
-                                }
-                                Button("Choose…") { model.chooseDirectory() }
-                            }
-                            .buttonStyle(PillButtonStyle(kind: .secondary, height: 26))
-                            FolderStructureRows(format: $model.config.folderStructure)
-                        }
-                    }
-                    VStack(alignment: .leading, spacing: 8) {
-                        SectionHeader(title: "From")
-                        Card {
-                            if model.libraries.count > 1 {
-                                CardRow {
-                                    Text("Library")
-                                    Spacer(minLength: 8)
-                                    Picker("Library", selection: libraryBinding) {
-                                        ForEach(model.libraries, id: \.self) { Text(model.libraryLabel($0)).tag($0) }
-                                    }
-                                    .labelsHidden()
-                                    .pickerStyle(.menu)
-                                    .tint(.white)
-                                    .fixedSize()
-                                }
-                            }
-                            CardRow {
-                                Text("Albums")
-                                Spacer(minLength: 8)
-                                Text(albumSummary).foregroundStyle(Theme.secondary).lineLimit(1).truncationMode(.tail)
-                                Button("Choose…") { showingAlbums = true }
-                                    .buttonStyle(PillButtonStyle(kind: .secondary, height: 26))
-                                    .fixedSize() // the album names give way, not the button
-                                    .disabled(model.phase != .signedIn)
-                            }
-                        }
-                    }
-                    VStack(alignment: .leading, spacing: 8) {
-                        SectionHeader(title: "Include")
-                        Card {
-                            SwitchRow(title: "Photos", isOn: inverted(\.skipPhotos))
-                            SwitchRow(title: "Videos", isOn: inverted(\.skipVideos))
-                            SwitchRow(title: "Live Photo videos", isOn: inverted(\.skipLivePhotos))
-                            SwitchRow(title: "Screenshots", isOn: inverted(\.skipScreenshots))
-                        }
-                    }
-                    if !model.config.dryRun && model.config.deletesFromICloud {
-                        Label("This setup deletes photos from iCloud after downloading them. Change it in Settings > Sync.",
-                              systemImage: "exclamationmark.triangle.fill")
-                            .font(.system(size: 12))
-                            .foregroundStyle(Theme.warning)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .padding(12)
-                            .panel(fill: Theme.warning.opacity(0.08), stroke: Theme.warning.opacity(0.35))
-                    }
-                }
-                .disabled(model.isDownloading)
-                .opacity(model.isDownloading ? 0.45 : 1)
-            }
-            .scrollIndicators(.never)
-        }
-        .padding(14)
-        // Clear the traffic lights, which sit over the top of the sidebar.
-        .padding(.top, 26)
-        .frame(width: 300)
-        .frame(maxHeight: .infinity, alignment: .top)
-        .panel(cornerRadius: 22)
-    }
-
-    private var accountHeader: some View {
-        HStack(spacing: 10) {
-            Text(Initials.of(model.accountName ?? model.appleID))
-                .font(.system(size: 13, weight: .semibold))
-                .frame(width: 38, height: 38)
-                .background(Theme.accent, in: .circle)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(model.accountName ?? model.appleID)
-                    .font(.system(size: 14, weight: .semibold))
-                    .lineLimit(1)
-                if model.accountName != nil {
-                    Text(model.appleID)
-                        .font(.system(size: 12))
-                        .foregroundStyle(Theme.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-            }
-            Spacer(minLength: 4)
-            Button { model.page = .setup } label: { CircleIcon(systemName: "gearshape") }
-                .buttonStyle(.plain)
-                .help("Setup")
-                .accessibilityLabel("Setup")
-            Menu {
-                Section(model.appleID) {
-                    Button("Reload Libraries and Albums", systemImage: "arrow.clockwise") {
-                        Task { await model.loadLibraries() }
-                    }
-                    .disabled(model.phase != .signedIn)
-                    Button("Sign Out", systemImage: "rectangle.portrait.and.arrow.right") { model.signOut() }
-                        .disabled(model.isDownloading)
-                }
-            } label: {
-                CircleIcon(systemName: "chevron.down")
-            }
-            .menuStyle(.button)
-            .buttonStyle(.plain)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .help("Account")
-            .accessibilityLabel("Account")
-        }
-        .padding(.leading, 4)
-    }
-
-    // MARK: Ready
-
-    private var readyStage: some View {
-        VStack(spacing: 24) {
-            ProgressRing(progress: nil, lineWidth: 8) {
-                Image(systemName: "icloud.and.arrow.down")
-                    .font(.system(size: 56, weight: .light))
-            }
-            .frame(width: 196, height: 196)
-
-            VStack(spacing: 8) {
-                Text(model.directory == nil ? "Choose a folder to begin" : "Ready when you are")
-                    .font(.system(size: 30, weight: .semibold))
-                    .tracking(-0.7)
-                Text("Photos already in your folder are skipped, so you can stop and pick up again any time.")
+    @ViewBuilder private var activityStage: some View {
+        if model.hasRun {
+            runStage
+        } else {
+            VStack(spacing: 14) {
+                HeroTile(systemName: "waveform.path.ecg")
+                Text("Nothing has run yet")
+                    .font(.system(size: 24, weight: .semibold))
+                    .tracking(-0.5)
+                Text("Start a sync or a dry run from Home, and its progress and activity show here.")
                     .font(.system(size: 14))
                     .foregroundStyle(Theme.secondary)
                     .multilineTextAlignment(.center)
-                    .frame(maxWidth: 360)
+                    .frame(maxWidth: 340)
+                Button { model.page = .library } label: { Text("Go to Home").frame(width: 120) }
+                    .buttonStyle(PillButtonStyle(kind: .secondary, height: 40))
+                    .padding(.top, 6)
             }
-
-            startButtons(large: true)
-
-            if let notice = model.notice {
-                ErrorBanner(message: notice).frame(maxWidth: 420)
-            }
-
-            if model.phase == .restoring {
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text("Connecting to iCloud…")
-                }
-                .font(.system(size: 12))
-                .foregroundStyle(Theme.secondary)
-                .padding(.horizontal, 14)
-                .frame(height: 34)
-                .panel(cornerRadius: 17)
-            } else if let status = idleStatus {
-                Text(status)
-                    .font(.system(size: 12))
-                    .foregroundStyle(Theme.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .padding(.horizontal, 14)
-                    .frame(height: 34)
-                    .panel(cornerRadius: 17)
-            }
+            .padding(.bottom, 24)
         }
-        .padding(.horizontal, 20)
     }
 
     private func startButtons(large: Bool) -> some View {
@@ -605,14 +444,6 @@ struct DownloadView: View {
             .keyboardShortcut(.defaultAction)
         }
         .disabled(model.directory == nil || model.phase != .signedIn)
-    }
-
-    private var idleStatus: String? {
-        guard model.directory != nil else { return nil }
-        var parts: [String] = []
-        if let summary = model.lastRunSummary { parts.append("Last run: \(summary)") }
-        if let next = model.nextRun { parts.append("Next run \(next.formatted(date: .omitted, time: .shortened))") }
-        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     // MARK: Running and finished
@@ -752,26 +583,6 @@ struct DownloadView: View {
         return text + ". Recently Deleted keeps them for 30 days."
     }
 
-    private var libraryBinding: Binding<String> {
-        Binding(get: { model.config.library ?? model.libraries.first ?? "PrimarySync" },
-                set: { name in
-                    model.config.library = name
-                    model.config.albums = []
-                    Task { await model.loadAlbums() }
-                })
-    }
-
-    private func inverted(_ key: WritableKeyPath<SyncConfiguration, Bool>) -> Binding<Bool> {
-        Binding(get: { !model.config[keyPath: key] }, set: { model.config[keyPath: key] = !$0 })
-    }
-
-    private var albumSummary: String {
-        switch model.config.albums.count {
-        case 0: return "All Photos"
-        case 1: return model.config.albums[0]
-        default: return "\(model.config.albums.count) albums"
-        }
-    }
 }
 
 struct Stat: Identifiable {
@@ -802,48 +613,6 @@ struct StatCard: View {
         .panel(fill: stat.isBad ? Theme.danger.opacity(0.14) : Theme.panelFill,
                stroke: stat.isBad ? Theme.dangerSoft.opacity(0.3) : Theme.panelStroke)
         .accessibilityElement(children: .combine)
-    }
-}
-
-/// Folder layout presets plus a custom icloudpd-style format, as rows of a card.
-struct FolderStructureRows: View {
-    @Binding var format: String
-
-    private var preset: Binding<String> {
-        Binding(get: { FolderStructure(rawValue: format) != nil ? format : "custom" },
-                set: { if $0 != "custom" { format = $0 } else if FolderStructure(rawValue: format) != nil { format = "{:%Y}/{:%m-%B}" } })
-    }
-
-    var body: some View {
-        CardRow {
-            Text("Folders")
-            Spacer(minLength: 8)
-            Picker("Folders", selection: preset) {
-                ForEach(FolderStructure.allCases, id: \.self) { Text($0.label).tag($0.rawValue) }
-                Text("Custom").tag("custom")
-            }
-            .labelsHidden()
-            .pickerStyle(.menu)
-            .tint(.white)
-            .fixedSize()
-        }
-        if FolderStructure(rawValue: format) == nil {
-            VStack(alignment: .leading, spacing: 4) {
-                TextField("Format", text: $format, prompt: Text("{:%Y}/{:%m}"))
-                    .textFieldStyle(.plain)
-                    .font(.system(.body, design: .monospaced))
-                Text(example).font(.caption).foregroundStyle(Theme.secondary)
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    private var example: String {
-        guard let f = try? FolderFormat(format) else { return "Use fields like {:%Y}, {:%m}, {:%d}, {:%B}." }
-        let path = f.path(for: Date())
-        return path.isEmpty ? "All photos in one folder" : "Today's photos go in \(path)/"
     }
 }
 

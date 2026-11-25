@@ -50,9 +50,9 @@ final class AppModel: ObservableObject {
     // MARK: Account
 
     @Published var phase: Phase = .signedOut
-    /// What the main window shows once signed in: the library, the guided setup that asks one
-    /// question at a time, or the page with every setting.
-    enum Page { case library, setup, settings }
+    /// What the main window shows once signed in: the home page, the activity of the current or
+    /// last run, the guided setup that asks one question at a time, or the page with every setting.
+    enum Page { case library, activity, setup, settings }
     @Published var page: Page = .library
     var isInside: Bool { phase == .signedIn || phase == .restoring }
     @Published var appleID: String = UserDefaults.standard.string(forKey: "appleID") ?? ""
@@ -71,7 +71,10 @@ final class AppModel: ObservableObject {
     // MARK: Settings (persisted)
 
     @Published var config: SyncConfiguration {
-        didSet { saveConfig() }
+        didSet {
+            saveConfig()
+            if config.directoryPath != oldValue.directoryPath { refreshGlance() }
+        }
     }
     @Published var adpWebAccess: Bool = UserDefaults.standard.bool(forKey: "adpWebAccess") {
         didSet { defaults.set(adpWebAccess, forKey: "adpWebAccess") }
@@ -116,6 +119,12 @@ final class AppModel: ObservableObject {
     @Published var log: [LogLine] = []
     @Published var lastRun: Date? = UserDefaults.standard.object(forKey: "lastRun") as? Date
     @Published var lastRunSummary: String? = UserDefaults.standard.string(forKey: "lastRunSummary")
+    /// Photos and videos the last full run found in iCloud and has on this Mac, for the home page.
+    @Published var lastRunItems: Int? = UserDefaults.standard.object(forKey: "lastRunItems") as? Int
+    @Published var lastRunFailed: Int = UserDefaults.standard.integer(forKey: "lastRunFailed")
+    /// The folder's size, the disk around it and its newest photos; nil until measured.
+    @Published var glance: LibraryGlance?
+    private var glanceTask: Task<Void, Never>?
     @Published var nextRun: Date?
     /// What the run screen is showing: a download (or dry run), or a delete list.
     enum RunKind { case download, deleteList }
@@ -159,6 +168,7 @@ final class AppModel: ObservableObject {
             Task { await signIn(password: nil, restoring: true) }
         }
         reschedule()
+        refreshGlance()
     }
 
     private func saveConfig() {
@@ -366,11 +376,21 @@ final class AppModel: ObservableObject {
         if let directory { NSWorkspace.shared.open(directory) }
     }
 
+    /// Measures the folder again, off the main thread. The home page shows the old numbers meanwhile.
+    func refreshGlance() {
+        glanceTask?.cancel()
+        guard let directory else { glance = nil; return }
+        glanceTask = Task {
+            let measured = await Task.detached(priority: .utility) { LibraryGlance.measure(directory) }.value
+            guard !Task.isCancelled, directory == self.directory else { return }
+            glance = measured
+        }
+    }
+
     /// Starts a run. A run that would delete from iCloud asks first (unless `confirmed`).
     func startDownload(dryRun: Bool = false, confirmed: Bool = false, scheduled: Bool = false) {
         guard account != nil, phase == .signedIn, directory != nil, !isDownloading else { return }
         notice = nil
-        page = .library // the run, or the question before it, is on the library page
         var run = config
         run.dryRun = run.dryRun || dryRun
         if run.deletesFromICloud && !run.dryRun && !confirmed && !scheduled {
@@ -383,6 +403,8 @@ final class AppModel: ObservableObject {
         }
         isDownloading = true
         hasRun = true
+        // A run you start opens its activity; a scheduled one leaves you where you are, and Home shows it.
+        if !scheduled { page = .activity }
         runKind = .download
         outcome = .finished
         currentDryRun = run.dryRun
@@ -410,6 +432,14 @@ final class AppModel: ObservableObject {
                     lastRunSummary = text
                     defaults.set(lastRun, forKey: "lastRun")
                     defaults.set(text, forKey: "lastRunSummary")
+                    lastRunFailed = summary.filesFailed
+                    defaults.set(summary.filesFailed, forKey: "lastRunFailed")
+                    // A run cut short by --until-found saw only the newest photos: keep the full count.
+                    if !summary.stoppedByUntilFound, run.albums.isEmpty {
+                        lastRunItems = summary.assetsSeen - summary.assetsFiltered
+                        defaults.set(lastRunItems, forKey: "lastRunItems")
+                    }
+                    refreshGlance()
                 }
                 if notifyWhenDone && (summary.filesDownloaded > 0 || summary.filesFailed > 0 || !scheduled) {
                     notify(title: run.dryRun ? "Dry run finished" : "iCloud Photos downloaded", body: text.prefix(1).uppercased() + text.dropFirst())
@@ -458,7 +488,7 @@ final class AppModel: ObservableObject {
         panel.message = "Choose a delete list: one FILENAME<TAB>SIZE<TAB>DATE per line"
         guard panel.runModal() == .OK, let url = panel.url, !isDownloading else { return }
         isDownloading = true
-        page = .library
+        page = .activity
         hasRun = true
         runKind = .deleteList
         outcome = .finished
