@@ -288,30 +288,47 @@ public final class PhotoLibrary: @unchecked Sendable {
 
     // MARK: Changes
 
-    /// Moves a photo to Recently Deleted in iCloud. Returns false when iCloud asks to try again later.
-    public func delete(_ asset: PhotoAsset) async throws -> Bool {
+    static func deleteOperation(_ asset: PhotoAsset) throws -> [String: Any] {
         guard let changeTag = asset.assetRecordChangeTag else {
             throw ICloudError.unexpectedResponse("asset has no change tag")
         }
-        let body: [String: Any] = [
-            "atomic": true,
-            "desiredKeys": ["isDeleted"],
-            "operations": [[
-                "operationType": "update",
-                "record": [
-                    "fields": ["isDeleted": ["value": 1]],
-                    "recordChangeTag": changeTag,
-                    "recordName": asset.assetRecordName,
-                    "recordType": "CPLAsset",
-                ],
-            ]],
-            "zoneID": zoneID,
+        return [
+            "operationType": "update",
+            "record": [
+                "fields": ["isDeleted": ["value": 1]],
+                "recordChangeTag": changeTag,
+                "recordName": asset.assetRecordName,
+                "recordType": "CPLAsset",
+            ],
         ]
+    }
+
+    func deleteBody(_ operations: [[String: Any]]) -> [String: Any] {
+        ["atomic": true, "desiredKeys": ["isDeleted"], "operations": operations, "zoneID": zoneID]
+    }
+
+    /// Moves a photo to Recently Deleted in iCloud. Returns false when iCloud asks to try again later.
+    public func delete(_ asset: PhotoAsset) async throws -> Bool {
+        let body = deleteBody([try PhotoLibrary.deleteOperation(asset)])
         do {
             _ = try await post("records/modify", body, contentType: "application/json")
             return true
         } catch ICloudError.server(let code, _) where code == "TRY_AGAIN_LATER" {
             return false // e.g. "Sync zone CAS Op-Lock failed" (#1283)
+        }
+    }
+
+    /// Moves several photos to Recently Deleted with one request. The request is atomic: false
+    /// means iCloud refused it and deleted none of them, so they can be tried one at a time.
+    public func delete(_ assets: [PhotoAsset]) async throws -> Bool {
+        let body = deleteBody(try assets.map(PhotoLibrary.deleteOperation))
+        do {
+            let response = try await post("records/modify", body, contentType: "application/json")
+            // A refused record comes back in "records" with its error instead of failing the request.
+            let records = response["records"] as? [[String: Any]] ?? []
+            return !records.contains { $0["serverErrorCode"] != nil }
+        } catch ICloudError.server(let code, _) where code != "ACCESS_DENIED" {
+            return false
         }
     }
 }

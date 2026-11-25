@@ -61,6 +61,7 @@ public final class SyncEngine: @unchecked Sendable {
     let folderFormat: FolderFormat
     let fileManager = FileManager.default
     private let reservations = PathReservations()
+    private let folders = FolderSizes()
     var reservationsForTests: PathReservations { reservations }
 
     public init(configuration: SyncConfiguration, timeZone: TimeZone = .current,
@@ -178,29 +179,50 @@ public final class SyncEngine: @unchecked Sendable {
     /// at the same time count as taken, so two photos with one name don't race for it.
     func resolve(_ file: PlannedFile, asset: PhotoAsset) -> (url: URL?, existing: URL?) {
         let c = configuration
-        return reservations.withLock { reserved in
-            func size(_ url: URL) -> Int? { reserved[url.path] ?? fileSize(url) }
-            var target = file.url
-            var existing = size(target)
-            var legacy: URL?
-            if existing == nil, file.size == .original {
-                // Older icloudpd versions wrote IMG_1234-original.jpg
-                let old = target.deletingLastPathComponent()
-                    .appendingPathComponent(FilenamePolicy.addSuffix("-original", to: target.lastPathComponent))
-                if let s = size(old) { existing = s; legacy = old }
+        // Disk work stays outside the lock every download shares: the folder is read once for the
+        // run, and a JPEG is only opened (to tell whether its date was written here) between tries.
+        folders.load(file.url.deletingLastPathComponent(), fileManager: fileManager)
+        var ownDate: [String: Bool] = [:]
+        while true {
+            var unknown: (url: URL, size: Int)?
+            let outcome: (url: URL?, existing: URL?)? = reservations.withLock { reserved in
+                func size(_ url: URL) -> Int? { reserved[url.path] ?? folders.size(of: url) ?? fileSize(url) }
+                var target = file.url
+                var existing = size(target)
+                var legacy: URL?
+                if existing == nil, file.size == .original {
+                    // Older icloudpd versions wrote IMG_1234-original.jpg
+                    let old = target.deletingLastPathComponent()
+                        .appendingPathComponent(FilenamePolicy.addSuffix("-original", to: target.lastPathComponent))
+                    if let s = size(old) { existing = s; legacy = old }
+                }
+                if let local = existing, c.fileMatchPolicy == .nameSizeDedupWithSuffix, !c.xmpSidecarOnly,
+                   local != file.version.size {
+                    var isOwn = false
+                    if c.setExifDatetime {
+                        let candidate = legacy ?? target
+                        guard let known = ownDate[candidate.path] else {
+                            unknown = (candidate, local)
+                            return nil
+                        }
+                        isOwn = known
+                    }
+                    if !isOwn {
+                        target = target.deletingLastPathComponent()
+                            .appendingPathComponent(FilenamePolicy.dedupName(target.lastPathComponent, size: file.version.size))
+                        legacy = nil
+                        existing = size(target)
+                    }
+                }
+                if existing != nil { return (nil, legacy ?? target) }
+                reserved[target.path] = file.version.size
+                return (target, nil)
             }
-            if let local = existing, c.fileMatchPolicy == .nameSizeDedupWithSuffix, !c.xmpSidecarOnly,
-               local != file.version.size,
-               !(c.setExifDatetime && ExifDate.hasOwnDate(legacy ?? target, date: asset.createdDate,
-                                                          localSize: local, iCloudSize: file.version.size)) {
-                target = target.deletingLastPathComponent()
-                    .appendingPathComponent(FilenamePolicy.dedupName(target.lastPathComponent, size: file.version.size))
-                legacy = nil
-                existing = size(target)
+            if let outcome { return outcome }
+            if let unknown {
+                ownDate[unknown.url.path] = ExifDate.hasOwnDate(unknown.url, date: asset.createdDate,
+                                                                localSize: unknown.size, iCloudSize: file.version.size)
             }
-            if existing != nil { return (nil, legacy ?? target) }
-            reserved[target.path] = file.version.size
-            return (target, nil)
         }
     }
 
@@ -210,9 +232,8 @@ public final class SyncEngine: @unchecked Sendable {
         var result = AssetResult()
         let c = configuration
         let (files, missing) = plan(asset)
-        let label = baseFilename(asset)
         for size in missing {
-            log(.error, "\(size) size does not exist for \(label). Skipping...")
+            log(.error, "\(size) size does not exist for \(baseFilename(asset)). Skipping...")
             result.present = false
         }
         for file in files {
@@ -385,6 +406,8 @@ public final class SyncEngine: @unchecked Sendable {
                 var downloading = 0
                 var listing = false
                 var listingDone = false
+                /// Downloaded and due to leave iCloud; sent together once their page is handled.
+                var toDelete: [PhotoAsset] = []
 
                 while true {
                     try Task.checkCancellation()
@@ -415,12 +438,26 @@ public final class SyncEngine: @unchecked Sendable {
                         }
                         prune?.record(assetID: slot.asset.id, paths: result?.expectedPaths ?? [])
 
-                        if try await handleICloudDeletion(slot.asset, passed: slot.passed, result: result, library: library, now: now) {
-                            summary.deletedFromICloud += 1
-                            if !dryRun { pager.adjustOffset(by: -1) }
+                        if shouldDeleteFromICloud(slot.asset, passed: slot.passed, result: result, now: now) {
+                            if dryRun {
+                                let label = baseFilename(slot.asset)
+                                log(.info, "[DRY RUN] Would delete \(label) in iCloud library \(library.name)")
+                                emit(.deletedFromICloud(name: label))
+                                summary.deletedFromICloud += 1
+                            } else {
+                                toDelete.append(slot.asset)
+                            }
                         }
                     }
                     if listed != handledBefore { emit(.progress(processed: listed)) }
+                    // The next page is only listed when nothing is waiting, so the deletions are
+                    // done, and the listing position moved back, before it is asked for.
+                    if !toDelete.isEmpty, stop || listed == enqueued {
+                        let deleted = try await deleteFromICloud(toDelete, library: library)
+                        summary.deletedFromICloud += deleted
+                        pager.adjustOffset(by: -deleted)
+                        toDelete = []
+                    }
                     if stop {
                         group.cancelAll()
                         break
@@ -478,9 +515,9 @@ public final class SyncEngine: @unchecked Sendable {
     }
 
     /// The delete-after-download and keep-recent-days decisions (icloudpd's should_delete).
-    func handleICloudDeletion(_ asset: PhotoAsset, passed: Bool, result: AssetResult?, library: PhotoLibrary, now: Date) async throws -> Bool {
+    func shouldDeleteFromICloud(_ asset: PhotoAsset, passed: Bool, result: AssetResult?, now: Date) -> Bool {
         let c = configuration
-        let label = baseFilename(asset)
+        var label: String { baseFilename(asset) }
         var shouldDelete = (result?.downloaded ?? false) && c.deleteAfterDownload
         if passed, let keep = c.keepICloudRecentDays {
             if !asset.hasAssetDate {
@@ -498,19 +535,33 @@ public final class SyncEngine: @unchecked Sendable {
                 }
             }
         }
-        guard shouldDelete else { return false }
-        if dryRun {
-            log(.info, "[DRY RUN] Would delete \(label) in iCloud library \(library.name)")
-            emit(.deletedFromICloud(name: label))
-            return true
-        }
-        if try await library.delete(asset) {
+        return shouldDelete
+    }
+
+    /// Moves photos to Recently Deleted in iCloud, in one request when there are several.
+    /// Returns how many iCloud deleted.
+    func deleteFromICloud(_ assets: [PhotoAsset], library: PhotoLibrary) async throws -> Int {
+        var deleted = 0
+        func report(_ asset: PhotoAsset) {
+            let label = baseFilename(asset)
             log(.info, "Deleted \(label) in iCloud")
             emit(.deletedFromICloud(name: label))
-            return true
+            deleted += 1
         }
-        log(.error, "Could not delete \(label) in iCloud: iCloud asked to try again later")
-        return false
+        if assets.count > 1, try await library.delete(assets) {
+            assets.forEach(report)
+            return deleted
+        }
+        // A single photo, or iCloud turned the request down as a whole (it is all or nothing):
+        // one at a time deletes the ones it does accept.
+        for asset in assets {
+            if try await library.delete(asset) {
+                report(asset)
+            } else {
+                log(.error, "Could not delete \(baseFilename(asset)) in iCloud: iCloud asked to try again later")
+            }
+        }
+        return deleted
     }
 
     // MARK: Auto-delete
@@ -580,6 +631,37 @@ private enum SyncStep: Sendable {
 extension SyncEngine {
     /// How many listed assets may wait unhandled before listing pauses (three pages).
     static let listingWindow = 300
+}
+
+/// The sizes of the files that were in each download folder when the run first looked there, read
+/// with one listing per folder instead of one lookup per photo. A file that isn't in here may
+/// still exist (it was downloaded since, or its name differs only in case), so a miss is checked on disk.
+final class FolderSizes: @unchecked Sendable {
+    private let lock = NSLock()
+    private var folders: [String: [String: Int]] = [:]
+
+    func load(_ folder: URL, fileManager: FileManager) {
+        let key = folder.path
+        lock.lock()
+        let known = folders[key] != nil
+        lock.unlock()
+        if known { return }
+        var sizes: [String: Int] = [:]
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey]
+        for url in (try? fileManager.contentsOfDirectory(at: folder, includingPropertiesForKeys: Array(keys))) ?? [] {
+            guard let values = try? url.resourceValues(forKeys: keys), values.isRegularFile == true,
+                  let size = values.fileSize else { continue }
+            sizes[url.lastPathComponent] = size
+        }
+        lock.lock()
+        if folders[key] == nil { folders[key] = sizes }
+        lock.unlock()
+    }
+
+    func size(of url: URL) -> Int? {
+        lock.lock(); defer { lock.unlock() }
+        return folders[url.deletingLastPathComponent().path]?[url.lastPathComponent]
+    }
 }
 
 /// Paths claimed by downloads in flight, with their expected sizes.

@@ -35,17 +35,34 @@ public struct AssetVersion: Equatable, Sendable {
 public struct PhotoAsset: @unchecked Sendable {
     let master: [String: Any]
     let asset: [String: Any]
+    // Read out of the records once: a run asks for these several times per asset.
+    let masterFields: [String: Any]
+    let assetFields: [String: Any]
+    /// The master record's name: icloudpd's asset id (used by name-id7 and pruning).
+    public let id: String
+    /// File name with invalid characters replaced, or a name made from the record id when iCloud has none.
+    public let filename: String
+    public let itemType: AssetItemType?
+    /// The files iCloud has for this asset, by size. Asset fields (edits) win over master fields.
+    public let versions: [VersionSize: AssetVersion]
 
     init(master: [String: Any], asset: [String: Any]) {
         self.master = master
         self.asset = asset
+        let masterFields = master["fields"] as? [String: Any] ?? [:]
+        let assetFields = asset["fields"] as? [String: Any] ?? [:]
+        let id = master["recordName"] as? String ?? ""
+        let rawItemType = (masterFields["itemType"] as? [String: Any])?["value"] as? String
+        let filename = PhotoAsset.filename(masterFields: masterFields, id: id, rawItemType: rawItemType)
+        let itemType = PhotoAsset.itemType(rawItemType, filename: filename)
+        self.masterFields = masterFields
+        self.assetFields = assetFields
+        self.id = id
+        self.filename = filename
+        self.itemType = itemType
+        self.versions = PhotoAsset.versions(itemType: itemType, assetFields: assetFields, masterFields: masterFields)
     }
 
-    var masterFields: [String: Any] { master["fields"] as? [String: Any] ?? [:] }
-    var assetFields: [String: Any] { asset["fields"] as? [String: Any] ?? [:] }
-
-    /// The master record's name: icloudpd's asset id (used by name-id7 and pruning).
-    public var id: String { master["recordName"] as? String ?? "" }
     /// The CPLAsset record's name and change tag, needed to delete it in iCloud.
     public var assetRecordName: String { asset["recordName"] as? String ?? "" }
     public var assetRecordChangeTag: String? { asset["recordChangeTag"] as? String }
@@ -83,7 +100,9 @@ public struct PhotoAsset: @unchecked Sendable {
     }
 
     /// The file name stored in iCloud (filenameEnc), or nil when there is none.
-    public var originalFilename: String? {
+    public var originalFilename: String? { PhotoAsset.originalFilename(masterFields) }
+
+    static func originalFilename(_ masterFields: [String: Any]) -> String? {
         guard let enc = masterFields["filenameEnc"] as? [String: Any],
               let value = enc["value"] as? String else { return nil }
         switch enc["type"] as? String {
@@ -99,20 +118,20 @@ public struct PhotoAsset: @unchecked Sendable {
         rawItemType.flatMap { PhotoAsset.itemTypeExtensions[$0] } ?? "unknown"
     }
 
-    /// File name with invalid characters replaced, or a name made from the record id when iCloud has none.
-    public var filename: String {
-        let raw = originalFilename ?? {
+    static func filename(masterFields: [String: Any], id: String, rawItemType: String?) -> String {
+        let raw = originalFilename(masterFields) ?? {
             let fingerprint = String(id.map { $0.isASCII && ($0.isLetter || $0.isNumber) ? $0 : "_" }.prefix(12))
-            return "\(fingerprint).\(itemTypeExtension)"
+            return "\(fingerprint).\(rawItemType.flatMap { itemTypeExtensions[$0] } ?? "unknown")"
         }()
         return FilenamePolicy.clean(raw)
     }
 
-    public var itemType: AssetItemType? {
-        guard let raw = rawItemType else { return nil }
-        if let known = PhotoAsset.itemTypes[raw] { return known }
-        let imageExtensions = [".heic", ".heif", ".png", ".jpg", ".jpeg", ".jxl", ".webp", ".gif", ".tif",
-                               ".tiff", ".avif", ".bmp", ".dng"]
+    static let imageExtensions = [".heic", ".heif", ".png", ".jpg", ".jpeg", ".jxl", ".webp", ".gif", ".tif",
+                                  ".tiff", ".avif", ".bmp", ".dng"]
+
+    static func itemType(_ raw: String?, filename: String) -> AssetItemType? {
+        guard let raw else { return nil }
+        if let known = itemTypes[raw] { return known }
         let lower = filename.lowercased()
         return imageExtensions.contains(where: { lower.hasSuffix($0) }) ? .image : .movie
     }
@@ -166,9 +185,9 @@ public struct PhotoAsset: @unchecked Sendable {
         }
     }
 
-    /// The files iCloud has for this asset, by size. Asset fields (edits) win over master fields.
-    public var versions: [VersionSize: AssetVersion] {
-        let prefixes = itemType == .movie ? PhotoAsset.videoVersionPrefixes : PhotoAsset.photoVersionPrefixes
+    static func versions(itemType: AssetItemType?, assetFields: [String: Any],
+                         masterFields: [String: Any]) -> [VersionSize: AssetVersion] {
+        let prefixes = itemType == .movie ? videoVersionPrefixes : photoVersionPrefixes
         var result: [VersionSize: AssetVersion] = [:]
         for (size, prefix) in prefixes {
             let fields: [String: Any]
@@ -176,9 +195,9 @@ public struct PhotoAsset: @unchecked Sendable {
             else if masterFields[prefix + "Res"] != nil { fields = masterFields }
             else { continue }
             guard let res = (fields[prefix + "Res"] as? [String: Any])?["value"] as? [String: Any],
-                  let byteCount = PhotoAsset.number(res["size"]),
+                  let byteCount = number(res["size"]),
                   let urlString = res["downloadURL"] as? String,
-                  let url = PhotoAsset.downloadURL(urlString),
+                  let url = downloadURL(urlString),
                   let type = (fields[prefix + "FileType"] as? [String: Any])?["value"] as? String
             else { continue }
             result[size] = AssetVersion(size: Int(byteCount), url: url, type: type,
@@ -191,10 +210,11 @@ public struct PhotoAsset: @unchecked Sendable {
     /// characters a strict URL parser rejects, the way python-requests does.
     static func downloadURL(_ string: String) -> URL? {
         if let url = URL(string: string), !string.contains("{") { return url }
-        let allowed = CharacterSet.urlQueryAllowed.union(.urlPathAllowed).union(CharacterSet(charactersIn: "%#"))
-            .subtracting(CharacterSet(charactersIn: "{} "))
-        return string.addingPercentEncoding(withAllowedCharacters: allowed).flatMap(URL.init(string:))
+        return string.addingPercentEncoding(withAllowedCharacters: downloadURLAllowed).flatMap(URL.init(string:))
     }
+
+    static let downloadURLAllowed = CharacterSet.urlQueryAllowed.union(.urlPathAllowed).union(CharacterSet(charactersIn: "%#"))
+        .subtracting(CharacterSet(charactersIn: "{} "))
 
     /// Versions after the RAW policy: swaps original and alternative so RAW is where asked (`--align-raw`).
     public func versions(rawPolicy: RawPolicy) -> [VersionSize: AssetVersion] {

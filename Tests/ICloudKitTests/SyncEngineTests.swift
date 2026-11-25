@@ -21,6 +21,9 @@ final class FakeICloud: URLProtocol {
     /// When set, the first download of each file is cut off after this many bytes.
     nonisolated(unsafe) static var truncateFirstDownload: Int?
     nonisolated(unsafe) static var truncated = Set<String>()
+    /// When set, a delete request with several photos is refused as a whole, the way an atomic one is.
+    nonisolated(unsafe) static var refuseBatchDeletes = false
+    nonisolated(unsafe) static var modifyRequests = 0
     static let lock = NSLock()
 
     static func reset(_ photos: [Photo]) {
@@ -30,6 +33,8 @@ final class FakeICloud: URLProtocol {
         rangeRequests = 0
         truncateFirstDownload = nil
         truncated = []
+        refuseBatchDeletes = false
+        modifyRequests = 0
     }
 
     override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "fake.icloud.test" }
@@ -126,6 +131,12 @@ final class FakeICloud: URLProtocol {
         let body = FakeICloud.body(of: request)
         if path.hasSuffix("/records/modify") {
             let ops = body["operations"] as? [[String: Any]] ?? []
+            FakeICloud.modifyRequests += 1
+            if FakeICloud.refuseBatchDeletes, ops.count > 1 {
+                return respond(200, json: ["records": ops.map { op in
+                    ["recordName": (op["record"] as? [String: Any])?["recordName"] ?? "", "serverErrorCode": "ATOMIC_ERROR"]
+                }])
+            }
             for op in ops {
                 let record = op["record"] as? [String: Any] ?? [:]
                 let name = record["recordName"] as? String ?? ""
@@ -258,6 +269,16 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertEqual(summary.deletedFromICloud, 7)
         XCTAssertEqual(FakeICloud.deleteRequests.count, 7)
         XCTAssertEqual(files().count, 8) // everything was downloaded before deleting
+        XCTAssertEqual(FakeICloud.modifyRequests, 1) // the page's deletions go in one request
+    }
+
+    func testRefusedBatchDeleteFallsBackToOneAtATime() async throws {
+        FakeICloud.refuseBatchDeletes = true
+        let (summary, events) = try await run { $0.keepICloudRecentDays = 0 }
+        XCTAssertEqual(summary.deletedFromICloud, 7)
+        XCTAssertEqual(FakeICloud.deleteRequests.count, 7)
+        XCTAssertEqual(FakeICloud.modifyRequests, 8) // the refused batch, then each photo
+        XCTAssertEqual(events.all.filter { if case .deletedFromICloud = $0 { return true } else { return false } }.count, 7)
     }
 
     func testDeleteAfterDownloadOnlyDeletesNewDownloads() async throws {
@@ -348,6 +369,16 @@ final class SyncEngineTests: XCTestCase {
         try FileManager.default.removeItem(at: sessionFile)
         http.absorb(response, url: url) // the same again changes nothing
         XCTAssertFalse(FileManager.default.fileExists(atPath: sessionFile.path))
+    }
+
+    /// Bigger than the amount a download may hold unwritten, so it is paused and resumed on the way.
+    func testLargeFileIsWrittenWhole() async throws {
+        var big = Data(count: 3 * DownloadRouter.pauseAbove + 12_345)
+        for i in stride(from: 0, to: big.count, by: 4_099) { big[i] = UInt8(i % 251) }
+        FakeICloud.reset([.init(id: "v", name: "IMG_0001.MOV", date: 1_722_427_200_000, data: big)])
+        let (summary, _) = try await run()
+        XCTAssertEqual(summary.filesDownloaded, 1)
+        XCTAssertEqual(try Data(contentsOf: dir.appendingPathComponent("IMG_0001.MOV")), big)
     }
 
     func testDeleteList() async throws {

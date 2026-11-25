@@ -198,7 +198,6 @@ public final class HTTPClient: @unchecked Sendable {
     /// (with an HTTP Range request) when there is one. Returns the HTTP status.
     public func downloadFile(_ url: URL, to partURL: URL,
                              progress: (@Sendable (Int) -> Void)? = nil) async throws -> Int {
-        // `progress` runs once per network chunk, on the queue every download shares: keep it cheap.
         let existing = (try? FileManager.default.attributesOfItem(atPath: partURL.path)[.size] as? NSNumber)?.intValue ?? 0
         var headers: [String: String] = [:]
         if existing > 0 { headers["Range"] = "bytes=\(existing)-" }
@@ -231,6 +230,10 @@ private final class TaskBox: @unchecked Sendable {
 
 /// Streams response bodies straight to disk (so large videos never sit in memory), appending to
 /// a partial file when the server honours the Range request.
+///
+/// The session's delegate queue is shared by every download, so it only hands the bytes on: each
+/// download writes on a queue of its own, and a slow disk holds up that download alone. A download
+/// whose unwritten bytes pile up is paused until the disk catches up.
 final class DownloadRouter: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     static let shared = DownloadRouter()
 
@@ -241,7 +244,13 @@ final class DownloadRouter: NSObject, URLSessionDataDelegate, @unchecked Sendabl
         let continuation: CheckedContinuation<(Int, HTTPURLResponse), Error>
         var handle: FileHandle?
         var response: HTTPURLResponse?
+        /// Writes and the final close run here, in the order the bytes arrived.
+        let writer = DispatchQueue(label: "icloudphotos.download.write")
+        /// Guards the three fields below, which the delegate queue and `writer` both touch.
+        let lock = NSLock()
         var failure: Error?
+        var unwritten = 0
+        var paused = false
 
         init(fileURL: URL, existingBytes: Int, progress: (@Sendable (Int) -> Void)?,
              continuation: CheckedContinuation<(Int, HTTPURLResponse), Error>) {
@@ -251,6 +260,10 @@ final class DownloadRouter: NSObject, URLSessionDataDelegate, @unchecked Sendabl
             self.continuation = continuation
         }
     }
+
+    /// Received but unwritten bytes at which a download is paused, and at which it goes on again.
+    static let pauseAbove = 4 << 20
+    static let resumeBelow = 1 << 20
 
     private let lock = NSLock()
     private var states: [Int: State] = [:]
@@ -319,15 +332,43 @@ final class DownloadRouter: NSObject, URLSessionDataDelegate, @unchecked Sendabl
             state.handle = handle
             completionHandler(.allow)
         } catch {
-            state.failure = error
+            state.lock.lock(); state.failure = error; state.lock.unlock()
             completionHandler(.cancel)
         }
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         guard let state = state(dataTask), let handle = state.handle else { return }
-        handle.write(data)
-        state.progress?(data.count)
+        state.lock.lock()
+        state.unwritten += data.count
+        if state.unwritten > DownloadRouter.pauseAbove, !state.paused {
+            state.paused = true
+            dataTask.suspend()
+        }
+        state.lock.unlock()
+
+        state.writer.async {
+            state.lock.lock()
+            let failed = state.failure != nil
+            state.lock.unlock()
+            var failure: Error?
+            if !failed {
+                do { try handle.write(contentsOf: data) } catch { failure = error }
+            }
+            state.lock.lock()
+            state.unwritten -= data.count
+            if let failure { state.failure = failure }
+            // A download that can't be written is given up; it has to be running to be told so.
+            let resume = state.paused && (failure != nil || state.unwritten <= DownloadRouter.resumeBelow)
+            if resume {
+                // Under the lock, like the suspend, so the two can't land in the wrong order.
+                state.paused = false
+                dataTask.resume()
+            }
+            state.lock.unlock()
+            if failure != nil { dataTask.cancel() }
+            if !failed, failure == nil { state.progress?(data.count) }
+        }
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
@@ -335,16 +376,22 @@ final class DownloadRouter: NSObject, URLSessionDataDelegate, @unchecked Sendabl
         let state = states.removeValue(forKey: task.taskIdentifier)
         lock.unlock()
         guard let state else { return }
-        state.handle?.closeFile()
-        if let response = state.response, !(200..<300).contains(response.statusCode) {
-            // 416: the partial file is already complete or no longer matches; the caller decides.
-            state.continuation.resume(returning: (response.statusCode, response))
-        } else if let failure = state.failure ?? error {
-            state.continuation.resume(throwing: failure)
-        } else if let response = state.response {
-            state.continuation.resume(returning: (response.statusCode, response))
-        } else {
-            state.continuation.resume(throwing: ICloudError.unexpectedResponse("no response"))
+        // After the last write: the caller checks the file's size as soon as it hears back.
+        state.writer.async {
+            try? state.handle?.close()
+            state.lock.lock()
+            let failure = state.failure
+            state.lock.unlock()
+            if let response = state.response, !(200..<300).contains(response.statusCode) {
+                // 416: the partial file is already complete or no longer matches; the caller decides.
+                state.continuation.resume(returning: (response.statusCode, response))
+            } else if let failure = failure ?? error {
+                state.continuation.resume(throwing: failure)
+            } else if let response = state.response {
+                state.continuation.resume(returning: (response.statusCode, response))
+            } else {
+                state.continuation.resume(throwing: ICloudError.unexpectedResponse("no response"))
+            }
         }
     }
 }
