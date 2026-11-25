@@ -1,12 +1,15 @@
-#if canImport(Security) && os(macOS)
 import Foundation
+#if canImport(Security)
 import Security
+#endif
 
 /// Stores the Apple ID password in the login Keychain, so it never sits in a file or in UserDefaults.
-enum Keychain {
-    static let service = "ICloudPhotos.AppleID"
+/// The app and the command-line tool share the same item. On platforms without a Keychain it stores nothing.
+public enum Keychain {
+    public static let service = "ICloudPhotos.AppleID"
 
-    static func password(for account: String) -> String? {
+    public static func password(for account: String) -> String? {
+        #if canImport(Security)
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -18,9 +21,13 @@ enum Keychain {
         guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
               let data = item as? Data else { return nil }
         return String(data: data, encoding: .utf8)
+        #else
+        return nil
+        #endif
     }
 
-    static func save(_ password: String, for account: String) {
+    public static func save(_ password: String, for account: String) {
+        #if canImport(Security)
         delete(account)
         let attributes: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -30,15 +37,17 @@ enum Keychain {
             kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlocked,
         ]
         SecItemAdd(attributes as CFDictionary, nil)
+        #endif
     }
 
-    static func delete(_ account: String) {
+    public static func delete(_ account: String) {
+        #if canImport(Security)
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
         ]
         SecItemDelete(query as CFDictionary)
+        #endif
     }
 }
-#endif

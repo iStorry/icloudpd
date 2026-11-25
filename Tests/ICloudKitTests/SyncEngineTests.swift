@@ -1,0 +1,309 @@
+import XCTest
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
+@testable import ICloudKit
+
+/// A fake iCloud Photos server: CloudKit queries, deletes and file downloads with Range support.
+final class FakeICloud: URLProtocol {
+    struct Photo {
+        var id: String
+        var name: String
+        var date: Double // ms
+        var data: Data
+        var deleted = false
+        var live: Data?
+    }
+
+    nonisolated(unsafe) static var photos: [Photo] = []
+    nonisolated(unsafe) static var deleteRequests: [String] = []
+    nonisolated(unsafe) static var rangeRequests = 0
+    /// When set, the first download of each file is cut off after this many bytes.
+    nonisolated(unsafe) static var truncateFirstDownload: Int?
+    nonisolated(unsafe) static var truncated = Set<String>()
+    static let lock = NSLock()
+
+    static func reset(_ photos: [Photo]) {
+        lock.lock(); defer { lock.unlock() }
+        self.photos = photos
+        deleteRequests = []
+        rangeRequests = 0
+        truncateFirstDownload = nil
+        truncated = []
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "fake.icloud.test" }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func stopLoading() {}
+
+    static func body(of request: URLRequest) -> [String: Any] {
+        var data = request.httpBody ?? Data()
+        if data.isEmpty, let stream = request.httpBodyStream {
+            stream.open()
+            var buffer = [UInt8](repeating: 0, count: 65_536)
+            while stream.hasBytesAvailable {
+                let n = stream.read(&buffer, maxLength: buffer.count)
+                if n <= 0 { break }
+                data.append(buffer, count: n)
+            }
+            stream.close()
+        }
+        return (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+    }
+
+    /// Collected under the lock, sent after it is released (corelibs runs protocol callbacks on its own queue).
+    var pending: (Int, Data, [String: String])?
+
+    func respond(_ status: Int, json: Any? = nil, data: Data? = nil, headers: [String: String] = [:]) {
+        var headers = headers
+        var body = data ?? Data()
+        if let json {
+            body = try! JSONSerialization.data(withJSONObject: json)
+            headers["Content-Type"] = "application/json"
+        }
+        pending = (status, body, headers)
+    }
+
+    func send() {
+        guard let (status, body, headers) = pending else { return }
+        let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: "HTTP/1.1", headerFields: headers)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    static func records(for photo: Photo) -> [[String: Any]] {
+        var master: [String: Any] = [
+            "filenameEnc": ["type": "STRING", "value": photo.name],
+            "itemType": ["value": photo.name.hasSuffix(".MOV") ? "com.apple.quicktime-movie" : "public.jpeg"],
+            "resOriginalRes": ["value": ["size": photo.data.count, "downloadURL": "https://fake.icloud.test/file/\(photo.id)/${f}", "fileChecksum": "c"]],
+            "resOriginalFileType": ["value": photo.name.hasSuffix(".MOV") ? "com.apple.quicktime-movie" : "public.jpeg"],
+        ]
+        if let live = photo.live {
+            master["resOriginalVidComplRes"] = ["value": ["size": live.count, "downloadURL": "https://fake.icloud.test/file/\(photo.id)-live/${f}", "fileChecksum": "l"]]
+            master["resOriginalVidComplFileType"] = ["value": "com.apple.quicktime-movie"]
+        }
+        return [
+            ["recordName": "M-\(photo.id)", "recordType": "CPLMaster", "fields": master],
+            ["recordName": "A-\(photo.id)", "recordType": "CPLAsset", "recordChangeTag": "t1",
+             "fields": ["masterRef": ["value": ["recordName": "M-\(photo.id)"]], "assetDate": ["value": photo.date]]],
+        ]
+    }
+
+    override func startLoading() {
+        FakeICloud.lock.lock()
+        handle()
+        FakeICloud.lock.unlock()
+        send()
+    }
+
+    func handle() {
+        let url = request.url!
+        let path = url.path
+
+        if path.hasPrefix("/file/") {
+            let id = path.split(separator: "/")[1]
+            let isLive = id.hasSuffix("-live")
+            let baseID = isLive ? String(id.dropLast(5)) : String(id)
+            guard let photo = FakeICloud.photos.first(where: { $0.id == baseID }) else { return respond(404) }
+            let data = isLive ? photo.live! : photo.data
+            var start = 0
+            if let range = request.value(forHTTPHeaderField: "Range"),
+               let n = Int(range.dropFirst("bytes=".count).dropLast()) {
+                FakeICloud.rangeRequests += 1
+                start = n
+                if start >= data.count { return respond(416) }
+            }
+            var chunk = data.subdata(in: start..<data.count)
+            if let cut = FakeICloud.truncateFirstDownload, !FakeICloud.truncated.contains(String(id)) {
+                FakeICloud.truncated.insert(String(id))
+                chunk = chunk.prefix(cut)
+            }
+            return respond(start > 0 ? 206 : 200, data: chunk,
+                           headers: start > 0 ? ["Content-Range": "bytes \(start)-\(data.count - 1)/\(data.count)"] : [:])
+        }
+
+        let body = FakeICloud.body(of: request)
+        if path.hasSuffix("/records/modify") {
+            let ops = body["operations"] as? [[String: Any]] ?? []
+            for op in ops {
+                let record = op["record"] as? [String: Any] ?? [:]
+                let name = record["recordName"] as? String ?? ""
+                FakeICloud.deleteRequests.append(name)
+                if let i = FakeICloud.photos.firstIndex(where: { "A-\($0.id)" == name }) { FakeICloud.photos[i].deleted = true }
+            }
+            return respond(200, json: ["records": []])
+        }
+        if path.hasSuffix("/internal/records/query/batch") {
+            let live = FakeICloud.photos.filter { !$0.deleted }.count
+            return respond(200, json: ["batch": [["records": [["fields": ["itemCount": ["value": live]]]]]]])
+        }
+        if path.hasSuffix("/records/query") {
+            let query = body["query"] as? [String: Any] ?? [:]
+            let type = query["recordType"] as? String
+            if type == "CheckIndexingState" {
+                return respond(200, json: ["records": [["fields": ["state": ["value": "FINISHED"]]]]])
+            }
+            let filters = query["filterBy"] as? [[String: Any]] ?? []
+            let start = filters.first { $0["fieldName"] as? String == "startRank" }
+                .flatMap { ($0["fieldValue"] as? [String: Any])?["value"] as? Int } ?? 0
+            let limit = (body["resultsLimit"] as? Int ?? 200) / 2
+            let deletedList = type == "CPLAssetAndMasterDeletedByExpungedDate"
+            // newest first, like iCloud
+            let list = FakeICloud.photos.filter { $0.deleted == deletedList }.sorted { $0.date > $1.date }
+            let page = list.dropFirst(start).prefix(limit)
+            return respond(200, json: ["records": page.flatMap(FakeICloud.records)])
+        }
+        respond(404)
+    }
+}
+
+final class SyncEngineTests: XCTestCase {
+    var dir: URL!
+
+    override func setUp() {
+        super.setUp()
+        HTTPClient.protocolClassesForTesting = [FakeICloud.self]
+        PhotoLibrary.indexingRetryDelay = 1_000
+        dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let day = 86_400_000.0
+        FakeICloud.reset((0..<7).map { i in
+            FakeICloud.Photo(id: "p\(i)", name: "IMG_000\(i).JPG", date: 1_722_427_200_000 - Double(i) * day,
+                             data: Data(repeating: UInt8(i), count: 1000 + i), live: i == 0 ? Data(repeating: 9, count: 300) : nil)
+        })
+    }
+
+    override func tearDown() {
+        try? FileManager.default.removeItem(at: dir)
+        super.tearDown()
+    }
+
+    func service() -> PhotosService {
+        let http = HTTPClient(homeEndpoint: "https://www.icloud.com", store: nil)
+        let params = PhotosService.query(dsid: "1")
+        let endpoint = PhotosService.endpoint(serviceRoot: "https://fake.icloud.test", libraryType: "private")
+        let library = PhotoLibrary(http: http, endpoint: endpoint, params: params, zoneID: ["zoneName": "PrimarySync"], libraryType: .private)
+        return PhotosService(http: http, serviceRoot: "https://fake.icloud.test", params: params, ignoreIndexingState: false, primary: library)
+    }
+
+    final class Events: @unchecked Sendable {
+        let lock = NSLock()
+        var all: [SyncEvent] = []
+        func add(_ e: SyncEvent) { lock.lock(); all.append(e); lock.unlock() }
+        var logs: [String] { all.compactMap { if case .log(_, let m) = $0 { return m } else { return nil } } }
+    }
+
+    func run(_ edit: (inout SyncConfiguration) -> Void = { _ in }) async throws -> (SyncSummary, Events) {
+        var config = SyncConfiguration(directoryPath: dir.path)
+        config.folderStructure = "none"
+        edit(&config)
+        let events = Events()
+        let engine = try SyncEngine(configuration: config, timeZone: TimeZone(identifier: "UTC")!) { events.add($0) }
+        return (try await engine.run(photos: service()), events)
+    }
+
+    func files() -> [String] {
+        ((try? FileManager.default.subpathsOfDirectory(atPath: dir.path)) ?? [])
+            .filter { !$0.hasPrefix(".icloudpd-swift") }.sorted()
+    }
+
+    func testDownloadsEverythingThenSkips() async throws {
+        let (first, _) = try await run()
+        XCTAssertEqual(first.filesDownloaded, 8) // 7 photos + 1 Live Photo video
+        XCTAssertEqual(files().count, 8)
+        XCTAssertTrue(files().contains("IMG_0000.MOV"))
+        let data = try Data(contentsOf: dir.appendingPathComponent("IMG_0003.JPG"))
+        XCTAssertEqual(data, Data(repeating: 3, count: 1003))
+        let attrs = try FileManager.default.attributesOfItem(atPath: dir.appendingPathComponent("IMG_0003.JPG").path)
+        XCTAssertEqual((attrs[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0, 1_722_427_200 - 3 * 86_400, accuracy: 1)
+
+        let (second, _) = try await run()
+        XCTAssertEqual(second.filesDownloaded, 0)
+        XCTAssertEqual(second.filesExisting, 7)
+    }
+
+    func testDryRunWritesNothing() async throws {
+        let (summary, events) = try await run { $0.dryRun = true; $0.keepICloudRecentDays = 0 }
+        XCTAssertEqual(summary.filesDownloaded, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.path))
+        XCTAssertEqual(events.all.filter { if case .wouldDownload = $0 { return true } else { return false } }.count, 8)
+        XCTAssertTrue(FakeICloud.deleteRequests.isEmpty)
+    }
+
+    func testRecentAndUntilFound() async throws {
+        let (recent, _) = try await run { $0.recent = 2 }
+        XCTAssertEqual(recent.assetsSeen, 2)
+        XCTAssertEqual(files(), ["IMG_0000.JPG", "IMG_0000.MOV", "IMG_0001.JPG"])
+
+        // A new photo appears at the top; until-found 2 stops after the two known ones.
+        FakeICloud.photos.append(.init(id: "new", name: "IMG_9999.JPG", date: 1_722_427_200_000 + 1000, data: Data(count: 5)))
+        let (until, _) = try await run { $0.untilFound = 2 }
+        XCTAssertTrue(until.stoppedByUntilFound)
+        XCTAssertEqual(until.filesDownloaded, 1)
+        XCTAssertEqual(until.assetsSeen, 3)
+    }
+
+    func testResumesPartialDownload() async throws {
+        FakeICloud.truncateFirstDownload = 400
+        let (summary, _) = try await run { $0.recent = 1; $0.skipLivePhotos = true }
+        XCTAssertEqual(summary.filesDownloaded, 1)
+        XCTAssertGreaterThan(FakeICloud.rangeRequests, 0)
+        XCTAssertEqual(try Data(contentsOf: dir.appendingPathComponent("IMG_0000.JPG")), Data(repeating: 0, count: 1000))
+        XCTAssertFalse(files().contains { $0.hasSuffix(".part") })
+    }
+
+    func testMoveModeDeletesOldPhotosFromICloud() async throws {
+        // Keep 0 days: every photo is old enough, so each is deleted once it's safely on disk.
+        let (summary, _) = try await run { $0.keepICloudRecentDays = 0 }
+        XCTAssertEqual(summary.deletedFromICloud, 7)
+        XCTAssertEqual(FakeICloud.deleteRequests.count, 7)
+        XCTAssertEqual(files().count, 8) // everything was downloaded before deleting
+    }
+
+    func testDeleteAfterDownloadOnlyDeletesNewDownloads() async throws {
+        _ = try await run { $0.recent = 2 }
+        let (summary, _) = try await run { $0.deleteAfterDownload = true }
+        XCTAssertEqual(summary.deletedFromICloud, 5)
+        XCTAssertFalse(FakeICloud.deleteRequests.contains("A-p0"))
+    }
+
+    func testAutoDeleteRemovesLocalCopiesOfDeletedPhotos() async throws {
+        _ = try await run { $0.xmpSidecar = true }
+        XCTAssertTrue(files().contains("IMG_0002.JPG.xmp"))
+        FakeICloud.photos[2].deleted = true
+        let (summary, _) = try await run { $0.autoDelete = true }
+        XCTAssertEqual(summary.deletedLocally, 2) // the photo and its sidecar
+        XCTAssertFalse(files().contains("IMG_0002.JPG"))
+    }
+
+    func testPruneMovesOrphansAside() async throws {
+        _ = try await run { $0.pruneOrphans = true }
+        FakeICloud.photos.removeAll { $0.id == "p4" }
+        let (summary, _) = try await run { $0.pruneOrphans = true }
+        XCTAssertEqual(summary.pruned, 1)
+        XCTAssertFalse(files().contains("IMG_0004.JPG"))
+        let pruned = try FileManager.default.subpathsOfDirectory(atPath: dir.appendingPathComponent(".icloudpd-swift-pruned").path)
+        XCTAssertTrue(pruned.contains { $0.hasSuffix("IMG_0004.JPG") })
+    }
+
+    func testSameNameDifferentPhotosBothKept() async throws {
+        FakeICloud.reset([
+            .init(id: "a", name: "IMG_1.JPG", date: 2_000, data: Data(repeating: 1, count: 10)),
+            .init(id: "b", name: "IMG_1.JPG", date: 1_000, data: Data(repeating: 2, count: 20)),
+        ])
+        let (summary, _) = try await run { $0.concurrentDownloads = 8 }
+        XCTAssertEqual(summary.filesDownloaded, 2)
+        // Whichever download claims the name first keeps it; the other gets its size added.
+        XCTAssertEqual(files().count, 2)
+        XCTAssertTrue(files().contains("IMG_1.JPG"))
+        XCTAssertTrue(files().contains("IMG_1-20.JPG") || files().contains("IMG_1-10.JPG"))
+    }
+
+    func testDeleteList() async throws {
+        let list = try DeleteList(contents: "IMG_0001.JPG\t1001\t\(1_722_427_200 - 86_400)\nIMG_7777.JPG\t1\t1722427200\n")
+        let summary = try await list.run(library: service().primary, dryRun: false) { _, _ in }
+        XCTAssertEqual(summary.deleted, 1)
+        XCTAssertEqual(summary.notFound, 1)
+        XCTAssertEqual(FakeICloud.deleteRequests, ["A-p1"])
+    }
+}

@@ -1,47 +1,59 @@
 # iCloud Photos Downloader for Mac
 
-A native SwiftUI app that downloads your iCloud Photos library to a folder on your Mac. It's a Swift
-reimplementation of the open-source [icloudpd](https://github.com/icloud-photos-downloader/icloud_photos_downloader)
-(MIT): it doesn't need Python and doesn't bundle icloudpd.
+A native SwiftUI app and command-line tool that download your iCloud Photos library to a folder on your Mac.
+It's a Swift reimplementation of the open-source [icloudpd](https://github.com/icloud-photos-downloader/icloud_photos_downloader)
+(MIT). It doesn't need Python and doesn't bundle icloudpd.
 
-## What works in this first version
+## Features
 
-- **Apple ID sign-in** using the same SRP-6a handshake icloudpd and icloud.com use. The password is only sent
-  to Apple as an SRP proof. If you choose, it's kept in your login Keychain.
-- **Two-factor codes**: a code pushed to your trusted devices, or a text message to a trusted number.
-- **Remembered sessions**: after one 2FA, later launches sign in without a code until Apple expires the
-  trust. Session tokens live in `~/Library/Application Support/ICloudPhotos/Sessions/` with `0600` permissions.
-- **Download All Photos** from your primary library: originals and Live Photo videos, with an option to skip videos.
-  - Folders: `2024/07/31/IMG_0001.HEIC` by default, or Year/Month, Year, or a single folder.
-  - Files already on disk are skipped. A different file with the same name gets a `-<size>` suffix, like icloudpd does.
-  - Each file is downloaded to a temporary file, size-checked, then moved into place, and its modification date
-    is set to when the photo was taken.
-- Live progress, a running log, and a Stop button.
+- **Sign-in**: Apple ID with the same SRP-6a handshake icloud.com uses. Two-factor codes (trusted device or
+  SMS), legacy two-step verification, remembered sessions, and Advanced Data Protection accounts once you
+  approve web access on a trusted device. The password can be kept in your login Keychain.
+- **What to download**: the primary or a shared library, any albums, Recently Deleted, Hidden.
+  Sizes original, medium, thumb, adjusted and alternative, with force-size. Live Photo video sizes. RAW
+  pairs, with align-raw. You can skip videos, photos or Live Photo videos.
+- **Filters**: created before or after a date (or "20d"), excluded file names, most recent N, and stop
+  after N files already on disk (until-found).
+- **Files**: folder structure presets or any `{:%Y/%m/%d}` format, a separate Live Photo folder, the Live
+  Photo file name policies, name-size dedup or name-id7, optional Unicode removal, set an EXIF date when
+  it's missing, and XMP sidecars.
+- **Sync**: auto-delete local files removed from iCloud, delete from iCloud after download, keep the last
+  N days in iCloud, prune local files that left the library (quarantined, not deleted), a delete list,
+  and dry run.
+- **Running it**: parallel downloads that resume after interruptions, scheduled runs, a menu bar mode,
+  notifications when a run ends, and open at login.
 
-## Not yet (planned, one at a time)
+## Not supported
 
-Albums and shared libraries, sizes other than original, RAW handling, sync mode (deleting local files removed from
-iCloud), "recent only" and "until found" incremental runs, EXIF date fixes, XMP sidecars, scheduled runs or a
-menu bar mode, security-key and legacy two-step accounts, and Advanced Data Protection.
+- **Security keys (FIDO)**: macOS only lets an app use security keys for its own website, so these
+  accounts can't sign in. Use a device code account.
+- **Email (SMTP) alerts and icloudpd's web UI**: the app uses macOS notifications instead, and the
+  command-line tool has `--notification-script`.
 
 ## Requirements
 
-- macOS 14 Sonoma or later, with Xcode 15+ (or the Command Line Tools).
-- On your iPhone or iPad: **Settings > [your name] > iCloud > Access iCloud Data on the Web** turned on, and
-  **Advanced Data Protection** turned off.
+- macOS 26 Tahoe or later, with Xcode 26+.
+- **Settings > [your name] > iCloud > Access iCloud Data on the Web** turned on.
 
 ## Build and run
 
 ```sh
-# Run straight from the package
-swift run ICloudPhotos
-
-# Or build a double-clickable app into ./build
-./scripts/build-app.sh
-open "build/iCloud Photos Downloader.app"
+swift run ICloudPhotos            # the app
+./scripts/build-app.sh            # build/iCloud Photos Downloader.app and build/icloudpd-swift
 ```
 
-You can also open `Package.swift` in Xcode and run the **ICloudPhotos** scheme.
+## Command-line tool
+
+`icloudpd-swift` takes icloudpd's options:
+
+```sh
+swift run icloudpd-swift --username you@example.com --directory ~/Pictures/iCloud \
+  --folder-structure "{:%Y/%m}" --size original --size adjusted --recent 100 --xmp-sidecar
+swift run icloudpd-swift --username you@example.com --list-albums
+```
+
+The password comes from `--password-provider` (keychain, console, or the `ICLOUD_PASSWORD` environment
+variable). A password typed at the console is saved to the Keychain.
 
 ## Tests
 
@@ -49,21 +61,5 @@ You can also open `Package.swift` in Xcode and run the **ICloudPhotos** scheme.
 swift test
 ```
 
-The SRP tests check the Swift handshake byte for byte against vectors made with python `srp`, configured
-exactly as icloudpd configures it. The core library (`ICloudKit`) and its tests also build on Linux.
-
-## Layout
-
-| Path | What it is |
-| --- | --- |
-| `Sources/ICloudKit/Crypto` | BigUInt, SHA-256/PBKDF2 wrappers, SRP-6a client |
-| `Sources/ICloudKit/Networking` | HTTP session with its own cookie jar and saved session tokens |
-| `Sources/ICloudKit/Auth` | Apple ID sign-in, 2FA, session trust (port of `pyicloud_ipd/base.py`) |
-| `Sources/ICloudKit/Photos` | Photos CloudKit queries and asset parsing (port of `services/photos.py`) |
-| `Sources/ICloudKit/Download` | File naming, folder layout and the download loop |
-| `Sources/ICloudPhotosApp` | The SwiftUI Mac app |
-
-## Note
-
-This app uses the same undocumented iCloud web endpoints as icloudpd, so it can break when Apple changes
-them. Check icloudpd's changelog when something stops working.
+SRP is checked byte for byte against vectors from python `srp`, set up as icloudpd sets it up. The sync
+engine is tested end to end against a fake iCloud. `ICloudKit` and its tests also build on Linux.

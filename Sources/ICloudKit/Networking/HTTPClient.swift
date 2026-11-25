@@ -36,6 +36,9 @@ public struct HTTPResponse {
 public final class HTTPClient: @unchecked Sendable {
     static let userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
 
+    /// Tests install a URLProtocol here to fake iCloud.
+    nonisolated(unsafe) static var protocolClassesForTesting: [AnyClass]?
+
     let urlSession: URLSession
     let homeEndpoint: String
     let store: SessionStore?
@@ -51,6 +54,7 @@ public final class HTTPClient: @unchecked Sendable {
         config.urlCache = nil
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
         config.timeoutIntervalForRequest = timeout
+        if let classes = HTTPClient.protocolClassesForTesting { config.protocolClasses = classes }
         self.urlSession = URLSession(configuration: config)
         self.homeEndpoint = homeEndpoint
         self.store = store
@@ -171,15 +175,17 @@ public final class HTTPClient: @unchecked Sendable {
         }
     }
 
-    /// Downloads `url` to a temporary file and returns it with the response.
-    public func download(_ url: URL) async throws -> (URL, HTTPURLResponse) {
-        let request = makeRequest("GET", url, headers: [:], body: nil)
-        let (fileURL, urlResponse) = try await urlSession.compatDownload(for: request)
-        guard let http = urlResponse as? HTTPURLResponse else {
-            throw ICloudError.unexpectedResponse("not an HTTP response")
-        }
-        absorb(http, url: url)
-        return (fileURL, http)
+    /// Downloads `url` into `partURL`, continuing a partial file left by an earlier run
+    /// (with an HTTP Range request) when there is one. Returns the HTTP status.
+    public func downloadFile(_ url: URL, to partURL: URL,
+                             progress: (@Sendable (Int) -> Void)? = nil) async throws -> Int {
+        let existing = (try? FileManager.default.attributesOfItem(atPath: partURL.path)[.size] as? NSNumber)?.intValue ?? 0
+        var headers: [String: String] = [:]
+        if existing > 0 { headers["Range"] = "bytes=\(existing)-" }
+        let request = makeRequest("GET", url, headers: headers, body: nil)
+        let (status, response) = try await DownloadRouter.shared.run(request, to: partURL, existingBytes: existing, progress: progress)
+        absorb(response, url: url)
+        return status
     }
 }
 
@@ -197,36 +203,128 @@ extension URLSession {
             task.resume()
         }
     }
-
-    /// async download(for:). The file is moved out of the system's temporary
-    /// location before returning, because URLSession deletes it after the callback.
-    func compatDownload(for request: URLRequest) async throws -> (URL, URLResponse) {
-        let taskBox = TaskBox()
-        return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
-                let task = downloadTask(with: request) { location, response, error in
-                    if let error { continuation.resume(throwing: error); return }
-                    guard let location, let response else {
-                        continuation.resume(throwing: ICloudError.unexpectedResponse("no file")); return
-                    }
-                    let kept = FileManager.default.temporaryDirectory
-                        .appendingPathComponent("icloudphotos-" + UUID().uuidString)
-                    do {
-                        try FileManager.default.moveItem(at: location, to: kept)
-                        continuation.resume(returning: (kept, response))
-                    } catch {
-                        continuation.resume(throwing: error)
-                    }
-                }
-                taskBox.task = task
-                task.resume()
-            }
-        } onCancel: {
-            taskBox.task?.cancel()
-        }
-    }
 }
 
 private final class TaskBox: @unchecked Sendable {
     var task: URLSessionTask?
+}
+
+/// Streams response bodies straight to disk (so large videos never sit in memory), appending to
+/// a partial file when the server honours the Range request.
+final class DownloadRouter: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    static let shared = DownloadRouter()
+
+    private final class State {
+        let fileURL: URL
+        let existingBytes: Int
+        let progress: (@Sendable (Int) -> Void)?
+        let continuation: CheckedContinuation<(Int, HTTPURLResponse), Error>
+        var handle: FileHandle?
+        var response: HTTPURLResponse?
+        var failure: Error?
+
+        init(fileURL: URL, existingBytes: Int, progress: (@Sendable (Int) -> Void)?,
+             continuation: CheckedContinuation<(Int, HTTPURLResponse), Error>) {
+            self.fileURL = fileURL
+            self.existingBytes = existingBytes
+            self.progress = progress
+            self.continuation = continuation
+        }
+    }
+
+    private let lock = NSLock()
+    private var states: [Int: State] = [:]
+    /// Created once in init: a lazy var isn't thread-safe, and two sessions would hand out
+    /// clashing task identifiers.
+    private var session: URLSession!
+
+    override init() {
+        super.init()
+        let config = URLSessionConfiguration.ephemeral
+        config.httpShouldSetCookies = false
+        config.httpCookieAcceptPolicy = .never
+        config.httpCookieStorage = nil
+        config.urlCache = nil
+        config.timeoutIntervalForRequest = 120
+        config.httpMaximumConnectionsPerHost = 16
+        if let classes = HTTPClient.protocolClassesForTesting { config.protocolClasses = classes }
+        let queue = OperationQueue()
+        queue.maxConcurrentOperationCount = 1
+        session = URLSession(configuration: config, delegate: self, delegateQueue: queue)
+    }
+
+    func run(_ request: URLRequest, to fileURL: URL, existingBytes: Int,
+             progress: (@Sendable (Int) -> Void)?) async throws -> (Int, HTTPURLResponse) {
+        let box = TaskBox()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let task = session.dataTask(with: request)
+                let state = State(fileURL: fileURL, existingBytes: existingBytes, progress: progress, continuation: continuation)
+                lock.lock(); states[task.taskIdentifier] = state; lock.unlock()
+                box.task = task
+                task.resume()
+            }
+        } onCancel: {
+            box.task?.cancel()
+        }
+    }
+
+    private func state(_ task: URLSessionTask) -> State? {
+        lock.lock(); defer { lock.unlock() }
+        return states[task.taskIdentifier]
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        guard let state = state(dataTask), let http = response as? HTTPURLResponse else {
+            completionHandler(.cancel); return
+        }
+        state.response = http
+        guard (200..<300).contains(http.statusCode) else {
+            completionHandler(.cancel); return
+        }
+        do {
+            let fm = FileManager.default
+            try fm.createDirectory(at: state.fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            // 206 continues the partial file; a full 200 answer starts it over.
+            if http.statusCode != 206 || !fm.fileExists(atPath: state.fileURL.path) {
+                fm.createFile(atPath: state.fileURL.path, contents: nil)
+            }
+            let handle = try FileHandle(forWritingTo: state.fileURL)
+            if http.statusCode == 206 {
+                handle.seekToEndOfFile()
+            } else {
+                handle.truncateFile(atOffset: 0)
+            }
+            state.handle = handle
+            completionHandler(.allow)
+        } catch {
+            state.failure = error
+            completionHandler(.cancel)
+        }
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        guard let state = state(dataTask), let handle = state.handle else { return }
+        handle.write(data)
+        state.progress?(data.count)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        lock.lock()
+        let state = states.removeValue(forKey: task.taskIdentifier)
+        lock.unlock()
+        guard let state else { return }
+        state.handle?.closeFile()
+        if let response = state.response, !(200..<300).contains(response.statusCode) {
+            // 416: the partial file is already complete or no longer matches; the caller decides.
+            state.continuation.resume(returning: (response.statusCode, response))
+        } else if let failure = state.failure ?? error {
+            state.continuation.resume(throwing: failure)
+        } else if let response = state.response {
+            state.continuation.resume(returning: (response.statusCode, response))
+        } else {
+            state.continuation.resume(throwing: ICloudError.unexpectedResponse("no response"))
+        }
+    }
 }

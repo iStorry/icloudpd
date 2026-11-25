@@ -17,6 +17,11 @@ public enum ICloudError: LocalizedError, Equatable {
     case http(status: Int, message: String)
     case server(code: String, reason: String)
     case unexpectedResponse(String)
+    case unknownLibrary(String)
+    case unknownAlbum(String)
+    /// "Access iCloud Data on the Web" is off, or the Advanced Data Protection approval didn't arrive.
+    case webAccessDenied(String)
+    case invalidOption(String)
 
     public var errorDescription: String? {
         switch self {
@@ -45,6 +50,14 @@ public enum ICloudError: LocalizedError, Equatable {
             return "iCloud error \(code): \(reason)"
         case .unexpectedResponse(let what):
             return "Unexpected response from iCloud: \(what)"
+        case .unknownLibrary(let name):
+            return "There's no library called \"\(name)\" in this account."
+        case .unknownAlbum(let name):
+            return "There's no album called \"\(name)\" in this library."
+        case .webAccessDenied(let reason):
+            return reason
+        case .invalidOption(let reason):
+            return reason
         }
     }
 }

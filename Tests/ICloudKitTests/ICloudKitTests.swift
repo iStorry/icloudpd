@@ -81,9 +81,9 @@ final class SRPTests: XCTestCase {
 }
 
 final class PhotosParsingTests: XCTestCase {
-    func page() throws -> PhotosService.Page {
+    func page() throws -> AssetPager.Page {
         let json = try JSONSerialization.jsonObject(with: fixture("page.json")) as! [String: Any]
-        return PhotosService.parsePage(json, previousMasters: [:])
+        return AssetPager.parsePage(json, previousMasters: [:])
     }
 
     func testPageKeepsEveryAssetOfASharedMaster() throws {
@@ -108,30 +108,153 @@ final class PhotosParsingTests: XCTestCase {
         XCTAssertTrue(video.isScreenshot)
     }
 
+    func engine(_ dir: URL, _ edit: (inout SyncConfiguration) -> Void = { _ in }) throws -> SyncEngine {
+        var config = SyncConfiguration(directoryPath: dir.path)
+        edit(&config)
+        return try SyncEngine(configuration: config, timeZone: TimeZone(identifier: "UTC")!) { _ in }
+    }
+
     func testPlanAndDedup() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: dir) }
-        let downloader = PhotoDownloader(options: DownloadOptions(directory: dir))
+        let engine = try engine(dir)
         let photo = try page().assets[0]
-        let plan = downloader.plan(photo, timeZone: TimeZone(identifier: "UTC")!)
-        XCTAssertEqual(plan.map(\.relativePath), ["2024/07/31/IMG_0001.HEIC", "2024/07/31/IMG_0001_HEVC.MOV"])
+        let plan = engine.plan(photo).files
+        XCTAssertEqual(plan.map { engine.relative($0.url) }, ["2024/07/31/IMG_0001.HEIC", "2024/07/31/IMG_0001_HEVC.MOV"])
 
         // Nothing on disk: goes to its own name
-        XCTAssertEqual(downloader.resolveDestination(plan[0])?.lastPathComponent, "IMG_0001.HEIC")
+        XCTAssertEqual(engine.resolve(plan[0], asset: photo).url?.lastPathComponent, "IMG_0001.HEIC")
+        engine.reservationsForTests.release(plan[0].url)
 
-        // Same size on disk: skipped
-        let target = dir.appendingPathComponent(plan[0].relativePath)
+        // Same size on disk: already there
+        let target = plan[0].url
         try FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data(count: 1000).write(to: target)
-        XCTAssertNil(downloader.resolveDestination(plan[0]))
+        XCTAssertNil(engine.resolve(plan[0], asset: photo).url)
 
         // Different size: gets the size suffix
         try Data(count: 10).write(to: target)
-        XCTAssertEqual(downloader.resolveDestination(plan[0])?.lastPathComponent, "IMG_0001-1000.HEIC")
+        let dedup = engine.resolve(plan[0], asset: photo).url
+        XCTAssertEqual(dedup?.lastPathComponent, "IMG_0001-1000.HEIC")
+        // ...and while that download runs, another photo with the same name doesn't take it
+        XCTAssertNil(engine.resolve(plan[0], asset: photo).url)
 
-        let noVideos = PhotoDownloader(options: DownloadOptions(directory: dir, includeVideos: false, includeLivePhotoVideos: false))
-        XCTAssertEqual(noVideos.plan(photo).count, 1)
-        XCTAssertEqual(noVideos.plan(try page().assets[2]).count, 0)
+        let noLive = try self.engine(dir) { $0.skipLivePhotos = true }
+        XCTAssertEqual(noLive.plan(photo).files.count, 1)
+        let noVideos = try self.engine(dir) { $0.skipVideos = true }
+        XCTAssertFalse(noVideos.passes(try page().assets[2]))
+        XCTAssertTrue(noVideos.passes(photo))
+    }
+
+    func testSizesAndPolicies() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let photo = try page().assets[0]
+        // medium doesn't exist: falls back to original unless forced
+        let medium = try engine(dir) { $0.sizes = [.medium]; $0.skipLivePhotos = true }
+        XCTAssertEqual(medium.plan(photo).files.map(\.url.lastPathComponent), ["IMG_0001.HEIC"])
+        let forced = try engine(dir) { $0.sizes = [.medium]; $0.forceSize = true; $0.skipLivePhotos = true }
+        XCTAssertEqual(forced.plan(photo).files.count, 0)
+        XCTAssertEqual(forced.plan(photo).missingSizes, ["medium"])
+
+        let id7 = try engine(dir) { $0.fileMatchPolicy = .nameID7; $0.folderStructure = "none"; $0.livePhotoMovFilenamePolicy = .original }
+        XCTAssertEqual(id7.plan(photo).files.map(\.url.lastPathComponent), ["IMG_0001_TTE=.HEIC", "IMG_0001_TTE=.MOV"])
+        XCTAssertEqual(id7.relative(id7.plan(photo).files[1].url), "IMG_0001_TTE=.MOV")
+
+        let liveDir = try engine(dir) { $0.livePhotoDirectoryPath = dir.appendingPathComponent("live").path; $0.livePhotoSize = .original }
+        XCTAssertTrue(liveDir.plan(photo).files[1].url.path.contains("/live/2024/07/31/"))
+    }
+
+    func testFilters() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let assets = try page().assets
+        let now = Date(timeIntervalSince1970: 1_722_427_200 + 10 * 86_400)
+        XCTAssertFalse(try engine(dir) { $0.skipScreenshots = true }.passes(assets[2], now: now))
+        XCTAssertFalse(try engine(dir) { $0.skipCreatedBefore = .daysAgo(5) }.passes(assets[0], now: now))
+        XCTAssertTrue(try engine(dir) { $0.skipCreatedBefore = .daysAgo(20) }.passes(assets[0], now: now))
+        XCTAssertFalse(try engine(dir) { $0.skipCreatedAfter = DateBound.parse("2024-01-01") }.passes(assets[0], now: now))
+        XCTAssertFalse(try engine(dir) { $0.excludeFilenames = ["img_00*.heic"] }.passes(assets[0], now: now))
+        XCTAssertTrue(try engine(dir) { $0.excludeFilenames = ["IMG_9*"] }.passes(assets[0], now: now))
+        XCTAssertFalse(try engine(dir) { $0.skipPhotos = true }.passes(assets[0], now: now))
+    }
+
+    func testFolderFormat() throws {
+        let date = Date(timeIntervalSince1970: 1_722_427_200) // 2024-07-31 12:00 UTC
+        let utc = TimeZone(identifier: "UTC")!
+        XCTAssertEqual(try FolderFormat("{:%Y/%m/%d}").path(for: date, timeZone: utc), "2024/07/31")
+        XCTAssertEqual(try FolderFormat("photos/{:%Y}/{:%m-%B}").path(for: date, timeZone: utc), "photos/2024/07-July")
+        XCTAssertEqual(try FolderFormat("none").path(for: date, timeZone: utc), "")
+        XCTAssertThrowsError(try FolderFormat("{%Y}"))
+        XCTAssertEqual(DateBound.parse("20d"), .daysAgo(20))
+        XCTAssertNotNil(DateBound.parse("2025-01-02T10:00:00+02:00"))
+        XCTAssertNil(DateBound.parse("yesterday"))
+    }
+
+    func testDisambiguate() {
+        let url = URL(string: "https://x")!
+        let jpeg = AssetVersion(size: 1, url: url, type: "public.jpeg", checksum: "")
+        let heic = AssetVersion(size: 2, url: url, type: "public.heic", checksum: "")
+        let (versions, overrides) = FilenamePolicy.disambiguate(
+            versions: [.original: jpeg, .adjusted: jpeg], sizes: [.original, .adjusted], base: "IMG.JPG", isImage: true, livePolicy: .suffix)
+        XCTAssertEqual(versions.count, 2)
+        XCTAssertEqual(overrides[.adjusted], "IMG-adjusted.JPG")
+        let (alt, _) = FilenamePolicy.disambiguate(versions: [.original: heic], sizes: [.alternative], base: "IMG.HEIC", isImage: true, livePolicy: .suffix)
+        XCTAssertEqual(alt[.alternative], heic)
+    }
+
+    func testXMP() throws {
+        let photo = try page().assets[0]
+        var m = XMPSidecar.metadata(for: photo)
+        XCTAssertEqual(m.createDate, Date(timeIntervalSince1970: 1_722_427_200))
+        m.title = "Beach & sun"
+        m.keywords = ["a", "b"]
+        m.rating = 5
+        m.gpsLatitude = 37.0
+        let xml = XMPSidecar.xml(m, toolkit: "icloudpd-swift test")
+        XCTAssertTrue(xml.hasPrefix("<?xml version='1.0' encoding='utf-8'?>\n<x:xml_doc xmlns:x=\"adobe:ns:meta/\" x:xmptk=\"icloudpd-swift test\">"))
+        XCTAssertTrue(xml.contains("<dc:title>Beach &amp; sun</dc:title>"))
+        XCTAssertTrue(xml.contains("<dc:subject><rdf:Seq><rdf:li>a</rdf:li><rdf:li>b</rdf:li></rdf:Seq></dc:subject>"))
+        XCTAssertTrue(xml.contains("<exif:GPSLatitude>37.0</exif:GPSLatitude>"))
+        XCTAssertTrue(xml.contains("<xmp:CreateDate>2024-07-31T12:00:00+0000</xmp:CreateDate>"))
+        XCTAssertTrue(xml.contains("<xmp:Rating>5</xmp:Rating>"))
+
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let foreign = dir.appendingPathComponent("a.JPG.xmp")
+        try Data("<x:xmpmeta xmlns:x=\"adobe:ns:meta/\" x:xmptk=\"Adobe XMP\"/>".utf8).write(to: foreign)
+        XCTAssertFalse(XMPSidecar.canWrite(at: foreign))
+        try Data(xml.utf8).write(to: foreign)
+        XCTAssertTrue(XMPSidecar.canWrite(at: foreign))
+    }
+
+    func testDeleteListParsing() throws {
+        let list = try DeleteList(contents: "# comment\nIMG_0001.HEIC\t1000\t2024-07-31T12:00:30Z\n\nclip_1.mov\t7\t1722427200\n")
+        XCTAssertEqual(list.entries.count, 2)
+        XCTAssertEqual(list.entries[0].line, 2)
+        XCTAssertThrowsError(try DeleteList(contents: "IMG.HEIC\t12\n"))
+        XCTAssertNoThrow(try DeleteList(contents: "IMG.HEIC\t12\n", allowUndated: true))
+        XCTAssertThrowsError(try DeleteList(contents: "IMG.HEIC\tabc\t1722427200\n"))
+        let photo = try page().assets[0]
+        XCTAssertTrue(DeleteList.matches(list.entries[0], photo))
+    }
+
+    func testPruneTracker() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try Data("x".utf8).write(to: dir.appendingPathComponent("gone.JPG"))
+        try Data("y".utf8).write(to: dir.appendingPathComponent("kept.JPG"))
+        var first = PruneTracker(directory: dir, library: "PrimarySync", fileManager: .default)
+        first.record(assetID: "A", paths: ["gone.JPG"])
+        first.record(assetID: "B", paths: ["kept.JPG"])
+        first.save()
+        var second = PruneTracker(directory: dir, library: "PrimarySync", fileManager: .default)
+        second.record(assetID: "B", paths: ["kept.JPG"])
+        var pruned: [String] = []
+        XCTAssertEqual(second.pruneOrphans(dryRun: false) { pruned.append($0) }, 1)
+        XCTAssertEqual(pruned, ["gone.JPG"])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent("gone.JPG").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dir.appendingPathComponent("kept.JPG").path))
     }
 
     func testFilenames() {

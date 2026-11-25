@@ -19,6 +19,19 @@ public enum SignInResult: Equatable, Sendable {
     /// Apple wants a six-digit code. Call `requestCodeOnTrustedDevices()` or the SMS
     /// methods, then `verify(code:)`.
     case needsVerificationCode
+    /// Older "two-step verification" accounts: pick a trusted device with `trustedDevices()`,
+    /// call `sendVerificationCode(to:)`, then `verify(code:device:)`.
+    case needsTwoStepVerification
+}
+
+/// A device that can receive a two-step verification code (older accounts).
+public struct TrustedDevice: Identifiable, @unchecked Sendable {
+    public let id: Int
+    let raw: [String: Any]
+    public var name: String {
+        if let phone = raw["phoneNumber"] as? String { return "Text message to \(phone)" }
+        return raw["deviceName"] as? String ?? "Device \(id + 1)"
+    }
 }
 
 public struct TrustedPhoneNumber: Equatable, Identifiable, Sendable {
@@ -67,7 +80,7 @@ public final class ICloudAccount: @unchecked Sendable {
             try await authenticateWithToken()
         }
         if requires2FA { return .needsVerificationCode }
-        if requires2SA { throw ICloudError.twoStepNotSupported }
+        if requires2SA { return .needsTwoStepVerification }
         return .signedIn
     }
 
@@ -289,6 +302,97 @@ public final class ICloudAccount: @unchecked Sendable {
         try await authenticateWithToken()
     }
 
+    /// True when the account signs in with security keys instead of codes (Apple then lists
+    /// no trusted phone numbers and sends an fsaChallenge).
+    public func usesSecurityKeys() async -> Bool {
+        guard let response = try? await http.send("GET", url(domain.authEndpoint),
+                                                  headers: authHeaders(["Accept": "application/json"]), checkErrors: false),
+              let data = try? response.json(),
+              let challenge = data["fsaChallenge"] as? [String: Any] else { return false }
+        return challenge["challenge"] != nil && challenge["keyHandles"] != nil && challenge["rpId"] != nil
+    }
+
+    // MARK: Two-step verification (older accounts)
+
+    private var dsidQuery: String {
+        var components = URLComponents()
+        components.queryItems = [URLQueryItem(name: "dsid", value: dsid ?? "")]
+        return components.percentEncodedQuery ?? ""
+    }
+
+    public func trustedDevices() async throws -> [TrustedDevice] {
+        let response = try await http.send("GET", url(domain.setup + "/listDevices?" + dsidQuery))
+        let devices = try response.json()["devices"] as? [[String: Any]] ?? []
+        return devices.enumerated().map { TrustedDevice(id: $0.offset, raw: $0.element) }
+    }
+
+    public func sendVerificationCode(to device: TrustedDevice) async throws {
+        let response = try await http.send("POST", url(domain.setup + "/sendVerificationCode?" + dsidQuery),
+                                           headers: ["Content-Type": "text/plain;charset=UTF-8"], body: jsonBody(device.raw))
+        guard try response.json()["success"] as? Bool == true else {
+            throw ICloudError.unexpectedResponse("Apple didn't send the code.")
+        }
+    }
+
+    public func verify(code: String, device: TrustedDevice) async throws {
+        var body = device.raw
+        body["verificationCode"] = code
+        body["trustBrowser"] = true
+        do {
+            _ = try await http.send("POST", url(domain.setup + "/validateVerificationCode?" + dsidQuery),
+                                    headers: ["Content-Type": "text/plain;charset=UTF-8"], body: jsonBody(body))
+        } catch ICloudError.server(let code, _) where code == "-21669" {
+            throw ICloudError.wrongVerificationCode
+        }
+        try await authenticateWithToken()
+        if requires2SA { throw ICloudError.wrongVerificationCode }
+    }
+
+    // MARK: Advanced Data Protection
+
+    /// Replays the icloud.com sequence that unlocks data protected by Advanced Data Protection
+    /// (`--adp-web-access`). The first time, Apple shows an approval request on your devices.
+    /// - Parameter waiting: called once when the approval prompt has been sent.
+    public func requestWebAccess(appName: String = "photos", timeout: TimeInterval = 120,
+                                 waiting: (@Sendable () -> Void)? = nil) async throws {
+        let workflow = ["workflowUuid": UUID().uuidString.uppercased()]
+        var components = URLComponents()
+        components.queryItems = [URLQueryItem(name: "dsid", value: dsid ?? ""),
+                                 URLQueryItem(name: "clientId", value: http.sessionData.clientID)]
+        let query = components.percentEncodedQuery ?? ""
+        func call(_ method: String, _ name: String, _ body: [String: Any]?) async throws -> [String: Any] {
+            let response = try await http.send(method, url("\(domain.setup)/\(name)?\(query)"),
+                                               headers: ["Content-Type": "text/plain;charset=UTF-8"],
+                                               body: body.map(jsonBody))
+            return try response.json()
+        }
+        var state = try await call("POST", "requestWebAccessState", workflow)
+        guard state["isWebAccessAllowed"] as? Bool == true else {
+            throw ICloudError.webAccessDenied("Web access to iCloud data is off. Turn on \"Access iCloud Data on the Web\" on your iPhone or iPad.")
+        }
+        if state["isDeviceConsentedForPCS"] as? Bool != true {
+            _ = try await call("POST", "enableDeviceConsentForPCS", workflow)
+            waiting?()
+            let deadline = Date().addingTimeInterval(timeout)
+            while state["isDeviceConsentedForPCS"] as? Bool != true {
+                if Date() > deadline {
+                    throw ICloudError.webAccessDenied("The iCloud web access approval didn't arrive in time.")
+                }
+                try await Task.sleep(nanoseconds: 3_000_000_000)
+                state = try await call("POST", "requestWebAccessState", workflow)
+            }
+        }
+        _ = try await call("GET", "generateSessionIdToken", nil)
+        var pcs: [String: Any] = ["appName": appName, "isFinalAttempt": false, "derivedFromUserAction": true]
+        pcs.merge(workflow) { $1 }
+        var result = try await call("POST", "requestPCS", pcs)
+        for _ in 0..<10 where result["status"] as? String != "success" {
+            try await Task.sleep(nanoseconds: 3_000_000_000)
+            pcs["derivedFromUserAction"] = false
+            result = try await call("POST", "requestPCS", pcs)
+        }
+    }
+
     // MARK: Services
 
     func webserviceURL(_ key: String) throws -> String {
@@ -300,10 +404,10 @@ public final class ICloudAccount: @unchecked Sendable {
     }
 
     /// The Photos service for the primary library. Throws until sign-in is complete.
-    public func photos() async throws -> PhotosService {
+    public func photos(ignoreIndexingState: Bool = false) async throws -> PhotosService {
         guard let dsid else { throw ICloudError.unexpectedResponse("not signed in") }
         let root = try webserviceURL("ckdatabasews")
-        return try await PhotosService.open(serviceRoot: root, dsid: dsid, http: http)
+        return try await PhotosService.open(serviceRoot: root, dsid: dsid, http: http, ignoreIndexingState: ignoreIndexingState)
     }
 }
 

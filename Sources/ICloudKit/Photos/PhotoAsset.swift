@@ -5,6 +5,13 @@ public enum AssetItemType: Sendable {
     case movie
 }
 
+/// `--align-raw`: where RAW goes for RAW+JPEG assets.
+public enum RawPolicy: String, Codable, CaseIterable, Sendable {
+    case asIs = "as-is"
+    case original
+    case alternative
+}
+
 public enum VersionSize: String, CaseIterable, Sendable {
     case original
     case alternative
@@ -37,7 +44,11 @@ public struct PhotoAsset: @unchecked Sendable {
     var masterFields: [String: Any] { master["fields"] as? [String: Any] ?? [:] }
     var assetFields: [String: Any] { asset["fields"] as? [String: Any] ?? [:] }
 
+    /// The master record's name: icloudpd's asset id (used by name-id7 and pruning).
     public var id: String { master["recordName"] as? String ?? "" }
+    /// The CPLAsset record's name and change tag, needed to delete it in iCloud.
+    public var assetRecordName: String { asset["recordName"] as? String ?? "" }
+    public var assetRecordChangeTag: String? { asset["recordChangeTag"] as? String }
 
     static let itemTypes: [String: AssetItemType] = [
         "public.heic": .image, "public.heif": .image, "public.jpeg": .image, "public.png": .image,
@@ -114,6 +125,25 @@ public struct PhotoAsset: @unchecked Sendable {
         return Date(timeIntervalSince1970: 0)
     }
 
+    /// False when iCloud gave no usable date and `createdDate` fell back to 1970.
+    public var hasAssetDate: Bool {
+        PhotoAsset.number((assetFields["assetDate"] as? [String: Any])?["value"]) != nil
+    }
+
+    /// Seconds east of UTC where the photo was taken, when iCloud knows it.
+    public var timeZoneOffset: Int? {
+        PhotoAsset.number((assetFields["timeZoneOffset"] as? [String: Any])?["value"]).map(Int.init)
+    }
+
+    /// Size in bytes of the original file.
+    public var size: Int {
+        let res = (masterFields["resOriginalRes"] as? [String: Any])?["value"] as? [String: Any]
+        return PhotoAsset.number(res?["size"]).map(Int.init) ?? 0
+    }
+
+    public var isHidden: Bool { PhotoAsset.number((assetFields["isHidden"] as? [String: Any])?["value"]) == 1 }
+    public var isDeleted: Bool { PhotoAsset.number((assetFields["isDeleted"] as? [String: Any])?["value"]) == 1 }
+
     public var addedDate: Date? {
         PhotoAsset.number((assetFields["addedDate"] as? [String: Any])?["value"]).map { Date(timeIntervalSince1970: $0 / 1000) }
     }
@@ -164,6 +194,18 @@ public struct PhotoAsset: @unchecked Sendable {
         let allowed = CharacterSet.urlQueryAllowed.union(.urlPathAllowed).union(CharacterSet(charactersIn: "%#"))
             .subtracting(CharacterSet(charactersIn: "{} "))
         return string.addingPercentEncoding(withAllowedCharacters: allowed).flatMap(URL.init(string:))
+    }
+
+    /// Versions after the RAW policy: swaps original and alternative so RAW is where asked (`--align-raw`).
+    public func versions(rawPolicy: RawPolicy) -> [VersionSize: AssetVersion] {
+        var result = versions
+        guard let alternative = result[.alternative], let original = result[.original] else { return result }
+        if (alternative.type.contains("raw") && rawPolicy == .original)
+            || (original.type.contains("raw") && rawPolicy == .alternative) {
+            result[.alternative] = original
+            result[.original] = alternative
+        }
+        return result
     }
 
     /// True when this is a Live Photo: an image with a paired video.

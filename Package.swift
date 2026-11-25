@@ -3,10 +3,11 @@ import PackageDescription
 
 let package = Package(
     name: "ICloudPhotos",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS("26.0")],
     products: [
         .library(name: "ICloudKit", targets: ["ICloudKit"]),
         .executable(name: "ICloudPhotos", targets: ["ICloudPhotosApp"]),
+        .executable(name: "icloudpd-swift", targets: ["icloudpd-swift"]),
     ],
     targets: [
         // Native Swift port of the parts of icloudpd / pyicloud_ipd the app needs.
@@ -14,6 +15,8 @@ let package = Package(
         // built-in SHA-256 elsewhere (only used so the tests run on Linux CI).
         .target(name: "ICloudKit"),
         .executableTarget(name: "ICloudPhotosApp", dependencies: ["ICloudKit"]),
+        // Command-line tool that takes icloudpd's options.
+        .executableTarget(name: "icloudpd-swift", dependencies: ["ICloudKit"]),
         .testTarget(
             name: "ICloudKitTests",
             dependencies: ["ICloudKit"],

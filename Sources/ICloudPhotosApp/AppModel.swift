@@ -2,7 +2,29 @@
 import AppKit
 import Foundation
 import ICloudKit
+import ServiceManagement
 import SwiftUI
+import UserNotifications
+
+/// How often to sync automatically (icloudpd's --watch-with-interval).
+enum ScheduleInterval: Int, CaseIterable, Identifiable, Codable {
+    case off = 0
+    case hourly = 3_600
+    case every6Hours = 21_600
+    case every12Hours = 43_200
+    case daily = 86_400
+
+    var id: Int { rawValue }
+    var label: String {
+        switch self {
+        case .off: return "Off"
+        case .hourly: return "Every hour"
+        case .every6Hours: return "Every 6 hours"
+        case .every12Hours: return "Every 12 hours"
+        case .daily: return "Every day"
+        }
+    }
+}
 
 @MainActor
 final class AppModel: ObservableObject {
@@ -10,6 +32,7 @@ final class AppModel: ObservableObject {
         case signedOut
         case signingIn
         case needsCode
+        case needsTwoStep
         case signedIn
     }
 
@@ -20,7 +43,10 @@ final class AppModel: ObservableObject {
         let isError: Bool
     }
 
-    // Account
+    private let defaults = UserDefaults.standard
+
+    // MARK: Account
+
     @Published var phase: Phase = .signedOut
     @Published var appleID: String = UserDefaults.standard.string(forKey: "appleID") ?? ""
     @Published var domain: ICloudDomain = ICloudDomain(rawValue: UserDefaults.standard.string(forKey: "domain") ?? "") ?? .com
@@ -28,45 +54,94 @@ final class AppModel: ObservableObject {
     @Published var errorMessage: String?
     @Published var accountName: String?
 
-    // Two-factor
+    // Two-factor and two-step
     @Published var phones: [TrustedPhoneNumber] = []
     @Published var smsPhone: TrustedPhoneNumber?
+    @Published var twoStepDevices: [TrustedDevice] = []
+    @Published var twoStepDevice: TrustedDevice?
     @Published var isVerifying = false
 
-    // Download settings
-    @Published var directory: URL? = UserDefaults.standard.url(forKey: "directory") {
-        didSet { UserDefaults.standard.set(directory, forKey: "directory") }
+    // MARK: Settings (persisted)
+
+    @Published var config: SyncConfiguration {
+        didSet { saveConfig() }
     }
-    @Published var folderStructure: FolderStructure =
-        FolderStructure(rawValue: UserDefaults.standard.string(forKey: "folderStructure") ?? "") ?? .yearMonthDay {
-        didSet { UserDefaults.standard.set(folderStructure.rawValue, forKey: "folderStructure") }
+    @Published var adpWebAccess: Bool = UserDefaults.standard.bool(forKey: "adpWebAccess") {
+        didSet { defaults.set(adpWebAccess, forKey: "adpWebAccess") }
     }
-    @Published var includeVideos: Bool = UserDefaults.standard.object(forKey: "includeVideos") as? Bool ?? true {
-        didSet { UserDefaults.standard.set(includeVideos, forKey: "includeVideos") }
+    @Published var schedule: ScheduleInterval = ScheduleInterval(rawValue: UserDefaults.standard.integer(forKey: "schedule")) ?? .off {
+        didSet { defaults.set(schedule.rawValue, forKey: "schedule"); reschedule() }
     }
-    @Published var includeLivePhotoVideos: Bool = UserDefaults.standard.object(forKey: "includeLive") as? Bool ?? true {
-        didSet { UserDefaults.standard.set(includeLivePhotoVideos, forKey: "includeLive") }
+    @Published var showInMenuBar: Bool = UserDefaults.standard.object(forKey: "showInMenuBar") as? Bool ?? true {
+        didSet { defaults.set(showInMenuBar, forKey: "showInMenuBar") }
+    }
+    @Published var notifyWhenDone: Bool = UserDefaults.standard.object(forKey: "notifyWhenDone") as? Bool ?? true {
+        didSet { defaults.set(notifyWhenDone, forKey: "notifyWhenDone"); if notifyWhenDone { requestNotificationPermission() } }
+    }
+    @Published var launchAtLogin: Bool = SMAppService.mainApp.status == .enabled {
+        didSet { updateLaunchAtLogin() }
     }
 
-    // Download progress
+    // MARK: Library and albums
+
+    @Published var libraries: [String] = []
+    @Published var albums: [String] = []
+    @Published var isLoadingAlbums = false
+
+    // MARK: Run state
+
     @Published var isDownloading = false
+    @Published var currentDryRun = false
+    @Published var currentAlbum: String?
     @Published var total: Int?
     @Published var processed = 0
     @Published var downloaded = 0
     @Published var skipped = 0
     @Published var failed = 0
     @Published var bytes = 0
+    @Published var deletedLocally = 0
+    @Published var deletedFromICloud = 0
+    @Published var pruned = 0
     @Published var log: [LogLine] = []
+    @Published var lastRun: Date? = UserDefaults.standard.object(forKey: "lastRun") as? Date
+    @Published var lastRunSummary: String? = UserDefaults.standard.string(forKey: "lastRunSummary")
+    @Published var nextRun: Date?
+    /// Set when a run would delete from iCloud, so the window can ask first.
+    @Published var pendingDestructiveRun = false
 
     private var account: ICloudAccount?
+    private var photos: PhotosService?
     private var downloadTask: Task<Void, Never>?
+    private var scheduleTimer: Timer?
+
+    static var canNotify: Bool { Bundle.main.bundleIdentifier != nil && Bundle.main.bundleURL.pathExtension == "app" }
 
     init() {
+        if let data = UserDefaults.standard.data(forKey: "syncConfiguration"),
+           let saved = try? JSONDecoder().decode(SyncConfiguration.self, from: data) {
+            config = saved
+        } else {
+            // Carry over the folder chosen in the first version of the app.
+            let old = UserDefaults.standard.url(forKey: "directory")?.path ?? ""
+            var fresh = SyncConfiguration(directoryPath: old)
+            fresh.keepUnicodeInFilenames = true // friendlier default on a Mac; icloudpd strips non-ASCII
+            if let legacy = UserDefaults.standard.string(forKey: "folderStructure"), let s = FolderStructure(rawValue: legacy) {
+                fresh.folderStructure = s.rawValue
+            }
+            config = fresh
+        }
         // Try the saved session quietly at launch.
-        if !appleID.isEmpty, UserDefaults.standard.bool(forKey: "wasSignedIn") {
+        if !appleID.isEmpty, defaults.bool(forKey: "wasSignedIn") {
             Task { await signIn(password: nil) }
         }
+        reschedule()
     }
+
+    private func saveConfig() {
+        if let data = try? JSONEncoder().encode(config) { defaults.set(data, forKey: "syncConfiguration") }
+    }
+
+    var directory: URL? { config.directoryPath.isEmpty ? nil : config.directory }
 
     // MARK: Sign-in
 
@@ -75,12 +150,13 @@ final class AppModel: ObservableObject {
         guard !id.isEmpty else { return }
         errorMessage = nil
         phase = .signingIn
-        UserDefaults.standard.set(id, forKey: "appleID")
-        UserDefaults.standard.set(domain.rawValue, forKey: "domain")
-        UserDefaults.standard.set(rememberPassword, forKey: "rememberPassword")
+        defaults.set(id, forKey: "appleID")
+        defaults.set(domain.rawValue, forKey: "domain")
+        defaults.set(rememberPassword, forKey: "rememberPassword")
 
         let account = ICloudAccount(appleID: id, domain: domain)
         self.account = account
+        photos = nil
         let remember = rememberPassword
         do {
             let result = try await account.signIn(password: {
@@ -92,12 +168,21 @@ final class AppModel: ObservableObject {
             }
             switch result {
             case .signedIn:
-                finishSignIn()
+                await finishSignIn()
             case .needsVerificationCode:
-                phase = .needsCode
                 smsPhone = nil
-                await account.requestCodeOnTrustedDevices()
                 phones = (try? await account.trustedPhoneNumbers()) ?? []
+                if phones.isEmpty, await account.usesSecurityKeys() {
+                    throw ICloudError.securityKeysNotSupported
+                }
+                phase = .needsCode
+                notify(title: "iCloud needs a verification code", body: "Open iCloud Photos Downloader to enter the code Apple sent you.")
+                await account.requestCodeOnTrustedDevices()
+            case .needsTwoStepVerification:
+                twoStepDevices = try await account.trustedDevices()
+                twoStepDevice = nil
+                phase = .needsTwoStep
+                notify(title: "iCloud needs a verification code", body: "Open iCloud Photos Downloader to finish signing in.")
             }
         } catch ICloudError.passwordRequired {
             phase = .signedOut // the saved session expired; just show the form
@@ -113,12 +198,14 @@ final class AppModel: ObservableObject {
         defer { isVerifying = false }
         errorMessage = nil
         do {
-            if let phone = smsPhone {
+            if let device = twoStepDevice {
+                try await account.verify(code: code, device: device)
+            } else if let phone = smsPhone {
                 try await account.verifySMS(code: code, phone: phone)
             } else {
                 try await account.verify(code: code)
             }
-            finishSignIn()
+            await finishSignIn()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -135,15 +222,28 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func sendTwoStepCode(to device: TrustedDevice) async {
+        guard let account else { return }
+        do {
+            try await account.sendVerificationCode(to: device)
+            twoStepDevice = device
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     func cancelVerification() {
         phase = .signedOut
+        twoStepDevice = nil
         account = nil
     }
 
-    private func finishSignIn() {
+    private func finishSignIn() async {
         phase = .signedIn
         accountName = account?.fullName
-        UserDefaults.standard.set(true, forKey: "wasSignedIn")
+        defaults.set(true, forKey: "wasSignedIn")
+        await loadLibraries()
     }
 
     func signOut() {
@@ -151,56 +251,148 @@ final class AppModel: ObservableObject {
         account?.signOut()
         Keychain.delete(appleID)
         account = nil
+        photos = nil
         accountName = nil
+        libraries = []
+        albums = []
         phase = .signedOut
-        UserDefaults.standard.set(false, forKey: "wasSignedIn")
+        defaults.set(false, forKey: "wasSignedIn")
+    }
+
+    // MARK: Libraries and albums
+
+    private func photosService() async throws -> PhotosService {
+        if let photos { return photos }
+        guard let account else { throw ICloudError.passwordRequired }
+        if adpWebAccess {
+            append("Asking for web access to your Advanced Data Protection data…")
+            try await account.requestWebAccess { [weak self] in
+                Task { @MainActor in self?.append("Approve the iCloud web access request on your iPhone, iPad or Mac.") }
+            }
+        }
+        let service = try await account.photos(ignoreIndexingState: config.ignoreIndexingState)
+        photos = service
+        return service
+    }
+
+    func loadLibraries() async {
+        do {
+            let service = try await photosService()
+            libraries = try await service.allLibraries().map(\.name)
+            if libraries.isEmpty { libraries = [service.primary.name] }
+            await loadAlbums()
+        } catch {
+            append("Couldn't load your libraries: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    func loadAlbums() async {
+        isLoadingAlbums = true
+        defer { isLoadingAlbums = false }
+        do {
+            let library = try await photosService().library(named: config.library)
+            albums = try await library.albums().map(\.name)
+        } catch {
+            albums = []
+            append("Couldn't load albums: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    func libraryLabel(_ name: String) -> String {
+        if name == "PrimarySync" || name == photos?.primary.name { return "Personal Library" }
+        if name.hasPrefix("SharedSync") { return "Shared Library" }
+        return name
     }
 
     // MARK: Download
 
     func chooseDirectory() {
+        if let url = pickFolder(message: "Choose where to save your iCloud photos") { config.directoryPath = url.path }
+    }
+
+    func chooseLivePhotoDirectory() {
+        if let url = pickFolder(message: "Choose where to save Live Photo videos") { config.livePhotoDirectoryPath = url.path }
+    }
+
+    func pickFolder(message: String) -> URL? {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.canCreateDirectories = true
         panel.allowsMultipleSelection = false
         panel.prompt = "Choose"
-        panel.message = "Choose where to save your iCloud photos"
-        if panel.runModal() == .OK { directory = panel.url }
+        panel.message = message
+        return panel.runModal() == .OK ? panel.url : nil
     }
 
-    func startDownload() {
-        guard let account, let directory, !isDownloading else { return }
+    func openDirectory() {
+        if let directory { NSWorkspace.shared.open(directory) }
+    }
+
+    /// Starts a run. A run that would delete from iCloud asks first (unless `confirmed`).
+    func startDownload(dryRun: Bool = false, confirmed: Bool = false, scheduled: Bool = false) {
+        guard account != nil, directory != nil, !isDownloading else { return }
+        var run = config
+        run.dryRun = run.dryRun || dryRun
+        if run.deletesFromICloud && !run.dryRun && !confirmed && !scheduled {
+            pendingDestructiveRun = true
+            return
+        }
+        do { try run.validate() } catch {
+            append(error.localizedDescription, isError: true)
+            return
+        }
         isDownloading = true
+        currentDryRun = run.dryRun
+        currentAlbum = nil
         total = nil
         processed = 0
         downloaded = 0
         skipped = 0
         failed = 0
         bytes = 0
+        deletedLocally = 0
+        deletedFromICloud = 0
+        pruned = 0
         log = []
-        append("Opening your iCloud Photos library…")
+        append(run.dryRun ? "Dry run: nothing will be downloaded, moved or deleted." : "Opening your iCloud Photos library…")
 
-        let options = DownloadOptions(directory: directory, folderStructure: folderStructure,
-                                      includeVideos: includeVideos, includeLivePhotoVideos: includeLivePhotoVideos)
         downloadTask = Task {
             do {
-                let photos = try await account.photos()
-                let downloader = PhotoDownloader(options: options)
-                let summary = try await downloader.run(service: photos) { event in
+                let service = try await photosService()
+                let engine = try SyncEngine(configuration: run) { event in
                     Task { @MainActor [weak self] in self?.handle(event) }
                 }
-                append("Done. \(summary.filesDownloaded) new files, \(summary.filesSkipped) already there, \(summary.filesFailed) failed.")
+                let summary = try await engine.run(photos: service)
+                var parts = ["\(summary.filesDownloaded) new", "\(summary.filesExisting) already saved"]
+                if summary.filesFailed > 0 { parts.append("\(summary.filesFailed) failed") }
+                if summary.deletedFromICloud > 0 { parts.append("\(summary.deletedFromICloud) \(run.dryRun ? "would be " : "")deleted from iCloud") }
+                if summary.deletedLocally > 0 { parts.append("\(summary.deletedLocally) \(run.dryRun ? "would be " : "")removed locally") }
+                if summary.pruned > 0 { parts.append("\(summary.pruned) orphans \(run.dryRun ? "would be " : "")moved aside") }
+                let text = parts.joined(separator: ", ")
+                append((run.dryRun ? "Dry run done: " : "Done: ") + text + ".")
+                if !run.dryRun {
+                    lastRun = Date()
+                    lastRunSummary = text
+                    defaults.set(lastRun, forKey: "lastRun")
+                    defaults.set(text, forKey: "lastRunSummary")
+                }
+                if notifyWhenDone && (summary.filesDownloaded > 0 || summary.filesFailed > 0 || !scheduled) {
+                    notify(title: run.dryRun ? "Dry run finished" : "iCloud Photos downloaded", body: text.prefix(1).uppercased() + text.dropFirst())
+                }
             } catch is CancellationError {
                 append("Stopped.")
             } catch {
                 append(error.localizedDescription, isError: true)
                 if case ICloudError.http(let status, _) = error, [401, 421, 450].contains(status) {
                     append("Your iCloud session expired. Sign in again.", isError: true)
+                    photos = nil
                     phase = .signedOut
+                    notify(title: "Sign in to iCloud again", body: "Your iCloud session expired, so scheduled downloads are paused.")
                 }
             }
             isDownloading = false
+            reschedule()
         }
     }
 
@@ -209,28 +401,128 @@ final class AppModel: ObservableObject {
         downloadTask = nil
     }
 
-    private func handle(_ event: DownloadEvent) {
+    func runDeleteList(dryRun: Bool, allowUndated: Bool) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.message = "Choose a delete list: one FILENAME<TAB>SIZE<TAB>DATE per line"
+        guard panel.runModal() == .OK, let url = panel.url, !isDownloading else { return }
+        isDownloading = true
+        currentDryRun = dryRun
+        log = []
+        append("\(dryRun ? "Checking" : "Deleting") the photos listed in \(url.lastPathComponent)…")
+        let libraryName = config.library
+        downloadTask = Task {
+            do {
+                let text = try String(contentsOf: url, encoding: .utf8)
+                let list = try DeleteList(contents: text, allowUndated: allowUndated, source: url.lastPathComponent)
+                let library = try await photosService().library(named: libraryName)
+                _ = try await list.run(library: library, dryRun: dryRun) { level, message in
+                    Task { @MainActor [weak self] in self?.append(message, isError: level >= .warning) }
+                }
+            } catch {
+                append(error.localizedDescription, isError: true)
+            }
+            isDownloading = false
+        }
+    }
+
+    private func handle(_ event: SyncEvent) {
         switch event {
-        case .counted(let total):
+        case .log(let level, let message):
+            if level >= .info { append(message, isError: level >= .warning) }
+        case .albumStarted(let title, let total):
+            currentAlbum = title
             self.total = total
-            append("\(total.formatted()) items in iCloud Photos.")
-        case .processed(let index):
-            processed = max(processed, index)
+            processed = 0
+            if let total { append("\(title): \(total.formatted()) items.") }
+        case .progress(let processed):
+            self.processed = processed
         case .downloaded(let path, let size):
             downloaded += 1
             bytes += size
             append("Downloaded \(path)")
+        case .wouldDownload(let path):
+            downloaded += 1
+            append("Would download \(path)")
         case .alreadyExists:
             skipped += 1
         case .failed(let name, let message):
             failed += 1
             append("\(name): \(message)", isError: true)
+        case .bytesReceived:
+            break
+        case .deletedLocally(let path):
+            deletedLocally += 1
+            append("\(currentDryRun ? "Would remove" : "Removed") \(path) (deleted in iCloud)")
+        case .deletedFromICloud:
+            deletedFromICloud += 1
+        case .pruned(let path):
+            pruned += 1
+            append("\(currentDryRun ? "Would move" : "Moved") \(path) to .icloudpd-swift-pruned")
         }
     }
 
-    private func append(_ text: String, isError: Bool = false) {
+    func append(_ text: String, isError: Bool = false) {
         log.append(LogLine(text: text, isError: isError))
-        if log.count > 500 { log.removeFirst(log.count - 500) }
+        if log.count > 1_000 { log.removeFirst(log.count - 1_000) }
+    }
+
+    // MARK: Schedule, notifications, login item
+
+    func reschedule() {
+        scheduleTimer?.invalidate()
+        scheduleTimer = nil
+        guard schedule != .off else { nextRun = nil; return }
+        let base = lastRun ?? Date()
+        var next = base.addingTimeInterval(TimeInterval(schedule.rawValue))
+        if next < Date().addingTimeInterval(60) { next = Date().addingTimeInterval(60) }
+        nextRun = next
+        let timer = Timer(fire: next, interval: 0, repeats: false) { [weak self] _ in
+            Task { @MainActor in self?.scheduledRunFired() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        scheduleTimer = timer
+    }
+
+    private func scheduledRunFired() {
+        guard phase == .signedIn, !isDownloading else { reschedule(); return }
+        startDownload(scheduled: true)
+    }
+
+    func requestNotificationPermission() {
+        guard AppModel.canNotify else { return }
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    }
+
+    func notify(title: String, body: String) {
+        guard AppModel.canNotify, notifyWhenDone || title.contains("verification") || title.contains("Sign in") else { return }
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
+    }
+
+    private func updateLaunchAtLogin() {
+        do {
+            if launchAtLogin {
+                if SMAppService.mainApp.status != .enabled { try SMAppService.mainApp.register() }
+            } else if SMAppService.mainApp.status == .enabled {
+                try SMAppService.mainApp.unregister()
+            }
+        } catch {
+            append("Couldn't change Open at Login: \(error.localizedDescription). Build the .app with scripts/build-app.sh first.", isError: true)
+        }
+    }
+
+    var statusLine: String {
+        if isDownloading {
+            var s = "\(processed.formatted())\(total.map { " of \($0.formatted())" } ?? "") checked"
+            s += " · \(downloaded.formatted()) \(currentDryRun ? "to download" : "new")"
+            return s
+        }
+        if let lastRun { return "Last run \(lastRun.formatted(.relative(presentation: .named)))" }
+        return "Not run yet"
     }
 }
 #endif
