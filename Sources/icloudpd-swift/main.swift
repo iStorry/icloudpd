@@ -66,6 +66,7 @@ What
   --size SIZE                       original, adjusted, alternative, medium, thumb; repeat for several
   --force-size                      Only download the requested size; don't fall back to original
   --live-photo-size SIZE            original, medium or thumb
+  --video-size SIZE                 original, medium or thumb, for videos only (default: same as --size)
   --skip-live-photos, --skip-videos, --skip-photos, --skip-screenshots
   --skip-created-before DATE        ISO date (2025-01-02) or interval (20d)
   --skip-created-after DATE         ISO date or interval
@@ -163,6 +164,7 @@ func parse(_ raw: [String]) -> Options {
         case "--size": sizes.append(choice(arg, PhotoSize.self))
         case "--force-size": c.forceSize = true
         case "--live-photo-size": c.livePhotoSize = choice(arg, LivePhotoSize.self)
+        case "--video-size": c.videoSize = choice(arg, PhotoSize.self)
         case "--skip-live-photos": c.skipLivePhotos = true
         case "--skip-videos": c.skipVideos = true
         case "--skip-photos": c.skipPhotos = true

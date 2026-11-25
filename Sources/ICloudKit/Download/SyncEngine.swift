@@ -150,7 +150,7 @@ public final class SyncEngine: @unchecked Sendable {
         let base = baseFilename(asset)
         let folders = datePath(asset)
         let allVersions = asset.versions(rawPolicy: c.alignRaw)
-        let sizes = c.sizes.map(\.versionSize)
+        let sizes = c.requestedSizes(isImage: isImage)
         let (versions, overrides) = FilenamePolicy.disambiguate(versions: allVersions, sizes: sizes, base: base,
                                                                  isImage: isImage, livePolicy: c.livePhotoMovFilenamePolicy)
         var files: [PlannedFile] = []
@@ -587,7 +587,7 @@ public final class SyncEngine: @unchecked Sendable {
         let folders = datePath(media)
         let versions = media.versions(rawPolicy: c.alignRaw)
         var paths: [URL] = []
-        let (chosen, overrides) = FilenamePolicy.disambiguate(versions: versions, sizes: c.sizes.map(\.versionSize), base: base,
+        let (chosen, overrides) = FilenamePolicy.disambiguate(versions: versions, sizes: c.requestedSizes(isImage: isImage), base: base,
                                                                isImage: isImage, livePolicy: c.livePhotoMovFilenamePolicy)
         for (size, version) in chosen where size == .alternative || size == .adjusted {
             let name = overrides[size] ?? FilenamePolicy.versionFilename(base: base, version: version, size: size, isImage: isImage,

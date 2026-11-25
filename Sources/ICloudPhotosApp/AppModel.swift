@@ -50,8 +50,10 @@ final class AppModel: ObservableObject {
     // MARK: Account
 
     @Published var phase: Phase = .signedOut
-    /// The settings page is showing in the main window, in place of the library page.
-    @Published var showingSettings = false
+    /// What the main window shows once signed in: the library, the guided setup that asks one
+    /// question at a time, or the page with every setting.
+    enum Page { case library, setup, settings }
+    @Published var page: Page = .library
     var isInside: Bool { phase == .signedIn || phase == .restoring }
     @Published var appleID: String = UserDefaults.standard.string(forKey: "appleID") ?? ""
     @Published var domain: ICloudDomain = ICloudDomain(rawValue: UserDefaults.standard.string(forKey: "domain") ?? "") ?? .com
@@ -82,6 +84,10 @@ final class AppModel: ObservableObject {
     }
     @Published var notifyWhenDone: Bool = UserDefaults.standard.object(forKey: "notifyWhenDone") as? Bool ?? true {
         didSet { defaults.set(notifyWhenDone, forKey: "notifyWhenDone"); if notifyWhenDone { requestNotificationPermission() } }
+    }
+    /// How much of a run the activity list shows: everything, each file and any problem, or problems only.
+    @Published var logLevel: SyncLogLevel = SyncLogLevel(rawValue: UserDefaults.standard.object(forKey: "logLevel") as? Int ?? 1) ?? .info {
+        didSet { defaults.set(logLevel.rawValue, forKey: "logLevel") }
     }
     @Published var launchAtLogin: Bool = SMAppService.mainApp.status == .enabled {
         didSet { updateLaunchAtLogin() }
@@ -264,6 +270,8 @@ final class AppModel: ObservableObject {
         phase = .signedIn
         accountName = account?.fullName
         defaults.set(true, forKey: "wasSignedIn")
+        // Nothing can be downloaded until there is a folder: start with the questions.
+        if directory == nil, page == .library { page = .setup }
         await loadLibraries()
     }
 
@@ -278,7 +286,7 @@ final class AppModel: ObservableObject {
         albums = []
         // The next account starts on the start screen, not on this one's last run.
         hasRun = false
-        showingSettings = false
+        page = .library
         notice = nil
         log = []
         resetRunCounters()
@@ -362,7 +370,7 @@ final class AppModel: ObservableObject {
     func startDownload(dryRun: Bool = false, confirmed: Bool = false, scheduled: Bool = false) {
         guard account != nil, phase == .signedIn, directory != nil, !isDownloading else { return }
         notice = nil
-        showingSettings = false // the run, or the question before it, is on the library page
+        page = .library // the run, or the question before it, is on the library page
         var run = config
         run.dryRun = run.dryRun || dryRun
         if run.deletesFromICloud && !run.dryRun && !confirmed && !scheduled {
@@ -450,7 +458,7 @@ final class AppModel: ObservableObject {
         panel.message = "Choose a delete list: one FILENAME<TAB>SIZE<TAB>DATE per line"
         guard panel.runModal() == .OK, let url = panel.url, !isDownloading else { return }
         isDownloading = true
-        showingSettings = false
+        page = .library
         hasRun = true
         runKind = .deleteList
         outcome = .finished
@@ -505,36 +513,40 @@ final class AppModel: ObservableObject {
     private func handle(_ event: SyncEvent) {
         switch event {
         case .log(let level, let message):
-            if level >= .info { append(message, isError: level >= .warning) }
+            if level >= logLevel { append(message, isError: level >= .warning) }
         case .albumStarted(let title, let total):
             currentAlbum = title
             self.total = total
             processed = 0
-            if let total { append("\(title): \(total.formatted()) items.") }
+            if let total, showsFiles { append("\(title): \(total.formatted()) items.") }
         case .progress(let processed):
             self.processed = processed
         case .downloaded(let path, let size):
             downloaded += 1
             bytes += size
-            append("Downloaded \(path)")
+            if showsFiles { append("Downloaded \(path)") }
         case .wouldDownload(let path):
             downloaded += 1
-            append("Would download \(path)")
-        case .alreadyExists:
+            if showsFiles { append("Would download \(path)") }
+        case .alreadyExists(let path):
             skipped += 1
+            if logLevel == .debug { append("Already saved \(path)") }
         case .failed(let name, let message):
             failed += 1
             append("\(name): \(message)", isError: true)
         case .deletedLocally(let path):
             deletedLocally += 1
-            append("\(currentDryRun ? "Would remove" : "Removed") \(path) (deleted in iCloud)")
+            if showsFiles { append("\(currentDryRun ? "Would remove" : "Removed") \(path) (deleted in iCloud)") }
         case .deletedFromICloud:
             deletedFromICloud += 1
         case .pruned(let path):
             pruned += 1
-            append("\(currentDryRun ? "Would move" : "Moved") \(path) to .icloudpd-swift-pruned")
+            if showsFiles { append("\(currentDryRun ? "Would move" : "Moved") \(path) to .icloudpd-swift-pruned") }
         }
     }
+
+    /// False when the activity list is set to problems only.
+    private var showsFiles: Bool { logLevel <= .info }
 
     func append(_ text: String, isError: Bool = false) {
         log.append(LogLine(text: text, isError: isError))

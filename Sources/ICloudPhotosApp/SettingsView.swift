@@ -37,12 +37,12 @@ struct SettingsSidebar: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             HStack(spacing: 10) {
-                Button { model.showingSettings = false } label: { CircleIcon(systemName: "chevron.left") }
+                Button { model.page = .setup } label: { CircleIcon(systemName: "chevron.left") }
                     .buttonStyle(.plain)
                     .keyboardShortcut(.cancelAction)
-                    .help("Back")
-                    .accessibilityLabel("Back")
-                Text("Settings")
+                    .help("Back to setup")
+                    .accessibilityLabel("Back to setup")
+                Text("All Settings")
                     .font(.system(size: 20, weight: .semibold))
                     .tracking(-0.3)
             }
@@ -301,6 +301,13 @@ struct GeneralSettings: View {
             SettingSwitch(title: "Open at login", isOn: $model.launchAtLogin)
             SettingSwitch(title: "Notify when a download finishes", isOn: $model.notifyWhenDone)
         }
+        SettingsSection {
+            SettingPicker(title: "Activity list shows", selection: $model.logLevel) {
+                Text("Each file and any problem").tag(SyncLogLevel.info)
+                Text("Everything, in detail").tag(SyncLogLevel.debug)
+                Text("Problems only").tag(SyncLogLevel.error)
+            }
+        }
         SettingsSection(footer: "More parallel downloads finish sooner on a fast connection. \"Stop after N already downloaded\" always downloads one at a time.") {
             SettingStepper(title: "Parallel downloads", value: $model.config.concurrentDownloads, range: 1...16)
         }
@@ -324,6 +331,14 @@ struct FileSettings: View {
                     .disabled(isOnlyOne)
             }
             SettingSwitch(title: "Only these sizes (don't fall back to the original)", isOn: $model.config.forceSize)
+        }
+        SettingsSection(title: "Videos") {
+            SettingPicker(title: "Size", selection: $model.config.videoSize) {
+                Text("Same as photos").tag(PhotoSize?.none)
+                Text("Original").tag(PhotoSize?.some(.original))
+                Text("Medium").tag(PhotoSize?.some(.medium))
+                Text("Thumbnail").tag(PhotoSize?.some(.thumb))
+            }
         }
         SettingsSection(title: "Live Photos") {
             SettingPicker(title: "Video size", selection: $model.config.livePhotoSize) {
@@ -518,9 +533,9 @@ struct MenuBarContent: View {
         Button("Show Downloads Folder") { model.openDirectory() }
             .disabled(model.directory == nil)
         Button("Open iCloud Photos Downloader") { showWindow() }
-        Button("Settings…") {
+        Button("Setup…") {
             showWindow()
-            model.showingSettings = true
+            model.page = .setup
         }
         .disabled(!model.isInside)
         Divider()

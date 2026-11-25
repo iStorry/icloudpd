@@ -370,8 +370,12 @@ struct DownloadView: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            // Settings take over both columns: their sections in the sidebar, the chosen one beside it.
-            if model.showingSettings {
+            // Setup and settings take over both columns: their steps or sections in the sidebar,
+            // the chosen one beside it.
+            if model.page == .setup {
+                SetupFlow()
+                    .transition(.opacity)
+            } else if model.page == .settings {
                 SettingsSidebar(pane: $settingsPane)
                     .transition(.opacity)
                 SettingsStage(pane: settingsPane)
@@ -389,7 +393,7 @@ struct DownloadView: View {
         }
         .padding(12)
         .animation(.smooth(duration: 0.3), value: isActive)
-        .animation(.smooth(duration: 0.22), value: model.showingSettings)
+        .animation(.smooth(duration: 0.22), value: model.page)
         .sheet(isPresented: $showingAlbums) {
             AlbumPicker().environmentObject(model)
         }
@@ -509,10 +513,10 @@ struct DownloadView: View {
                 }
             }
             Spacer(minLength: 4)
-            Button { model.showingSettings = true } label: { CircleIcon(systemName: "gearshape") }
+            Button { model.page = .setup } label: { CircleIcon(systemName: "gearshape") }
                 .buttonStyle(.plain)
-                .help("Settings")
-                .accessibilityLabel("Settings")
+                .help("Setup")
+                .accessibilityLabel("Setup")
             Menu {
                 Section(model.appleID) {
                     Button("Reload Libraries and Albums", systemImage: "arrow.clockwise") {

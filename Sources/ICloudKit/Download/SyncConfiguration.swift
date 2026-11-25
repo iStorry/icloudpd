@@ -112,6 +112,8 @@ public struct SyncConfiguration: Codable, Equatable, Sendable {
     public var sizes: [PhotoSize] = [.original]
     public var forceSize = false
     public var livePhotoSize: LivePhotoSize = .original
+    /// The size videos are downloaded in (original, medium or thumb); nil gives them the photo sizes.
+    public var videoSize: PhotoSize?
     public var skipLivePhotos = false
     public var skipVideos = false
     public var skipPhotos = false
@@ -163,6 +165,12 @@ public struct SyncConfiguration: Codable, Equatable, Sendable {
         livePhotoDirectoryPath.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath, isDirectory: true) }
     }
 
+    /// The sizes to fetch for one asset: videos have a size of their own when one is set.
+    func requestedSizes(isImage: Bool) -> [VersionSize] {
+        if !isImage, let videoSize { return [videoSize.versionSize] }
+        return sizes.map(\.versionSize)
+    }
+
     /// True when the run may delete photos from iCloud.
     public var deletesFromICloud: Bool { deleteAfterDownload || keepICloudRecentDays != nil }
 
@@ -170,6 +178,9 @@ public struct SyncConfiguration: Codable, Equatable, Sendable {
     public func validate() throws {
         if directoryPath.isEmpty { throw ICloudError.invalidOption("Choose a download folder.") }
         if sizes.isEmpty { throw ICloudError.invalidOption("Choose at least one size.") }
+        if let videoSize, ![.original, .medium, .thumb].contains(videoSize) {
+            throw ICloudError.invalidOption("Videos come as original, medium or thumb.")
+        }
         if skipPhotos && skipVideos { throw ICloudError.invalidOption("Skipping both photos and videos leaves nothing to download.") }
         if let days = keepICloudRecentDays, days < 0 { throw ICloudError.invalidOption("Keep-in-iCloud days can't be negative.") }
         if deletesFromICloud && ignoreIndexingState {

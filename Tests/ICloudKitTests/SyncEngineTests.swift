@@ -486,6 +486,24 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertEqual(store.load().0.scnt, "abc")
     }
 
+    func testVideosCanHaveTheirOwnSize() throws {
+        var config = SyncConfiguration(directoryPath: dir.path)
+        config.sizes = [.original, .adjusted]
+        XCTAssertEqual(config.requestedSizes(isImage: false), [.original, .adjusted]) // none set: as photos
+        config.videoSize = .medium
+        XCTAssertEqual(config.requestedSizes(isImage: true), [.original, .adjusted])
+        XCTAssertEqual(config.requestedSizes(isImage: false), [.medium])
+        XCTAssertNoThrow(try config.validate())
+        config.videoSize = .adjusted // there is no edited version of a video
+        XCTAssertThrowsError(try config.validate())
+
+        // A configuration saved before videos had a size still loads.
+        var saved = try JSONSerialization.jsonObject(with: JSONEncoder().encode(SyncConfiguration(directoryPath: "/x"))) as! [String: Any]
+        saved["videoSize"] = nil
+        let loaded = try JSONDecoder().decode(SyncConfiguration.self, from: JSONSerialization.data(withJSONObject: saved))
+        XCTAssertNil(loaded.videoSize)
+    }
+
     func testDeleteList() async throws {
         let list = try DeleteList(contents: "IMG_0001.JPG\t1001\t\(1_722_427_200 - 86_400)\nIMG_7777.JPG\t1\t1722427200\n")
         let summary = try await list.run(library: service().primary, dryRun: false) { _, _ in }
