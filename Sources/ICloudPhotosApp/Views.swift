@@ -279,7 +279,14 @@ struct VerificationView: View {
     private func submit() {
         guard code.count == 6, !model.isVerifying else { return }
         let typed = code
-        Task { await model.verify(code: typed) }
+        Task {
+            await model.verify(code: typed)
+            // A code Apple turned down is no use in the boxes: empty them for the next try.
+            if model.errorMessage != nil, model.phase != .signedIn {
+                code = ""
+                codeFocused = true
+            }
+        }
     }
 }
 
@@ -383,7 +390,7 @@ struct DownloadView: View {
     }
 
     /// A run is going, or its results are still on screen.
-    private var isActive: Bool { model.isDownloading || model.processed > 0 }
+    private var isActive: Bool { model.isDownloading || model.hasRun }
 
     // MARK: Sidebar
 
@@ -423,7 +430,7 @@ struct DownloadView: View {
                                     }
                                     .labelsHidden()
                                     .pickerStyle(.menu)
-                .tint(.white)
+                                    .tint(.white)
                                     .fixedSize()
                                 }
                             }
@@ -535,6 +542,10 @@ struct DownloadView: View {
 
             startButtons(large: true)
 
+            if let notice = model.notice {
+                ErrorBanner(message: notice).frame(maxWidth: 420)
+            }
+
             if let status = idleStatus {
                 Text(status)
                     .font(.system(size: 12))
@@ -592,7 +603,7 @@ struct DownloadView: View {
                     } else if model.isDownloading {
                         ProgressView().controlSize(.large)
                     } else {
-                        Image(systemName: "checkmark").font(.system(size: 40, weight: .medium))
+                        Image(systemName: outcomeSymbol).font(.system(size: 40, weight: .medium))
                     }
                 }
                 .frame(width: 160, height: 160)
@@ -615,10 +626,12 @@ struct DownloadView: View {
                         Text(runTitle)
                             .font(.system(size: 25, weight: .semibold))
                             .tracking(-0.6)
-                        Text("\(model.processed.formatted())\(model.total.map { " of \($0.formatted())" } ?? "") checked")
-                            .font(.system(size: 14))
-                            .foregroundStyle(Theme.secondary)
-                            .monospacedDigit()
+                        if model.runKind == .download {
+                            Text("\(model.processed.formatted())\(model.total.map { " of \($0.formatted())" } ?? "") checked")
+                                .font(.system(size: 14))
+                                .foregroundStyle(Theme.secondary)
+                                .monospacedDigit()
+                        }
                     }
                     if model.isDownloading {
                         Button { model.stopDownload() } label: {
@@ -632,8 +645,11 @@ struct DownloadView: View {
                 Spacer(minLength: 0)
             }
 
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 124), spacing: 10)], alignment: .leading, spacing: 10) {
-                ForEach(stats) { StatCard(stat: $0) }
+            // A delete list downloads nothing, so it has no numbers to show here.
+            if model.runKind == .download {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 124), spacing: 10)], alignment: .leading, spacing: 10) {
+                    ForEach(stats) { StatCard(stat: $0) }
+                }
             }
 
             VStack(alignment: .leading, spacing: 8) {
@@ -653,8 +669,27 @@ struct DownloadView: View {
     }
 
     private var runTitle: String {
-        if model.isDownloading { return model.currentDryRun ? "Checking your library" : "Downloading your photos" }
-        return model.currentDryRun ? "Dry run finished" : "Finished"
+        let dry = model.currentDryRun
+        let deleteList = model.runKind == .deleteList
+        if model.isDownloading {
+            if deleteList { return dry ? "Checking the delete list" : "Deleting listed photos" }
+            return dry ? "Checking your library" : "Downloading your photos"
+        }
+        switch model.outcome {
+        case .stopped: return "Stopped"
+        case .failed: return "Couldn't finish"
+        case .finished:
+            if deleteList { return dry ? "Delete list checked" : "Delete list finished" }
+            return dry ? "Dry run finished" : "Finished"
+        }
+    }
+
+    private var outcomeSymbol: String {
+        switch model.outcome {
+        case .finished: return "checkmark"
+        case .stopped: return "stop.fill"
+        case .failed: return "exclamationmark.triangle"
+        }
     }
 
     private var stats: [Stat] {
@@ -759,7 +794,7 @@ struct FolderStructureRows: View {
             }
             .labelsHidden()
             .pickerStyle(.menu)
-                .tint(.white)
+            .tint(.white)
             .fixedSize()
         }
         if FolderStructure(rawValue: format) == nil {
@@ -813,10 +848,22 @@ struct AlbumPicker: View {
             .frame(height: 36)
             .panel(cornerRadius: 18, fill: Theme.fieldFill, stroke: Color.white.opacity(0.1))
 
+            // A row to pick like the albums below, not a switch: a switch could be flipped off,
+            // and there is nothing for "not All Photos" to mean until an album is chosen.
             Card {
-                SwitchRow(title: "All Photos", isOn: Binding(
-                    get: { model.config.albums.isEmpty },
-                    set: { if $0 { model.config.albums = [] } }))
+                let isOn = model.config.albums.isEmpty
+                Button { model.config.albums = [] } label: {
+                    CardRow(minHeight: 42) {
+                        Text("All Photos")
+                        Spacer(minLength: 8)
+                        Image(systemName: isOn ? "checkmark.circle.fill" : "circle")
+                            .font(.system(size: 18))
+                            .foregroundStyle(isOn ? Theme.accentSoft : Color.white.opacity(0.3))
+                    }
+                    .contentShape(.rect)
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(isOn ? .isSelected : [])
             }
 
             HStack {

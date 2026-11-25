@@ -106,6 +106,16 @@ final class AppModel: ObservableObject {
     @Published var lastRun: Date? = UserDefaults.standard.object(forKey: "lastRun") as? Date
     @Published var lastRunSummary: String? = UserDefaults.standard.string(forKey: "lastRunSummary")
     @Published var nextRun: Date?
+    /// What the run screen is showing: a download (or dry run), or a delete list.
+    enum RunKind { case download, deleteList }
+    /// How the last run ended.
+    enum RunOutcome { case finished, stopped, failed }
+    /// True once a run was started: the window then keeps showing it and its activity.
+    @Published var hasRun = false
+    @Published var runKind: RunKind = .download
+    @Published var outcome: RunOutcome = .finished
+    /// A problem outside a run (a setting that can't work, albums that didn't load), for the start screen.
+    @Published var notice: String?
     /// Set when a run would delete from iCloud, so the window can ask first.
     @Published var pendingDestructiveRun = false
 
@@ -236,6 +246,9 @@ final class AppModel: ObservableObject {
     func cancelVerification() {
         phase = .signedOut
         twoStepDevice = nil
+        smsPhone = nil
+        phones = []
+        errorMessage = nil // it was about the code, not about signing in
         account = nil
     }
 
@@ -255,6 +268,11 @@ final class AppModel: ObservableObject {
         accountName = nil
         libraries = []
         albums = []
+        // The next account starts on the start screen, not on this one's last run.
+        hasRun = false
+        notice = nil
+        log = []
+        resetRunCounters()
         phase = .signedOut
         defaults.set(false, forKey: "wasSignedIn")
     }
@@ -276,6 +294,7 @@ final class AppModel: ObservableObject {
     }
 
     func loadLibraries() async {
+        notice = nil
         do {
             let service = try await photosService()
             libraries = try await service.allLibraries().map(\.name)
@@ -289,6 +308,7 @@ final class AppModel: ObservableObject {
     func loadAlbums() async {
         isLoadingAlbums = true
         defer { isLoadingAlbums = false }
+        notice = nil
         do {
             let library = try await photosService().library(named: config.library)
             albums = try await library.albums().map(\.name)
@@ -332,6 +352,7 @@ final class AppModel: ObservableObject {
     /// Starts a run. A run that would delete from iCloud asks first (unless `confirmed`).
     func startDownload(dryRun: Bool = false, confirmed: Bool = false, scheduled: Bool = false) {
         guard account != nil, directory != nil, !isDownloading else { return }
+        notice = nil
         var run = config
         run.dryRun = run.dryRun || dryRun
         if run.deletesFromICloud && !run.dryRun && !confirmed && !scheduled {
@@ -343,17 +364,11 @@ final class AppModel: ObservableObject {
             return
         }
         isDownloading = true
+        hasRun = true
+        runKind = .download
+        outcome = .finished
         currentDryRun = run.dryRun
-        currentAlbum = nil
-        total = nil
-        processed = 0
-        downloaded = 0
-        skipped = 0
-        failed = 0
-        bytes = 0
-        deletedLocally = 0
-        deletedFromICloud = 0
-        pruned = 0
+        resetRunCounters()
         log = []
         append(run.dryRun ? "Dry run: nothing will be downloaded, moved or deleted." : "Opening your iCloud Photos library…")
 
@@ -382,12 +397,15 @@ final class AppModel: ObservableObject {
                     notify(title: run.dryRun ? "Dry run finished" : "iCloud Photos downloaded", body: text.prefix(1).uppercased() + text.dropFirst())
                 }
             } catch is CancellationError {
+                outcome = .stopped
                 append("Stopped.")
             } catch {
+                outcome = .failed
                 append(error.localizedDescription, isError: true)
                 if case ICloudError.http(let status, _) = error, [401, 421, 450].contains(status) {
                     append("Your iCloud session expired. Sign in again.", isError: true)
                     photos = nil
+                    errorMessage = "Your iCloud session expired. Sign in again." // the sign-in form says why it is back
                     phase = .signedOut
                     notify(title: "Sign in to iCloud again", body: "Your iCloud session expired, so scheduled downloads are paused.")
                 }
@@ -395,6 +413,19 @@ final class AppModel: ObservableObject {
             isDownloading = false
             reschedule()
         }
+    }
+
+    private func resetRunCounters() {
+        currentAlbum = nil
+        total = nil
+        processed = 0
+        downloaded = 0
+        skipped = 0
+        failed = 0
+        bytes = 0
+        deletedLocally = 0
+        deletedFromICloud = 0
+        pruned = 0
     }
 
     func stopDownload() {
@@ -409,7 +440,12 @@ final class AppModel: ObservableObject {
         panel.message = "Choose a delete list: one FILENAME<TAB>SIZE<TAB>DATE per line"
         guard panel.runModal() == .OK, let url = panel.url, !isDownloading else { return }
         isDownloading = true
+        hasRun = true
+        runKind = .deleteList
+        outcome = .finished
+        notice = nil
         currentDryRun = dryRun
+        resetRunCounters() // the last download's numbers aren't this run's
         log = []
         append("\(dryRun ? "Checking" : "Deleting") the photos listed in \(url.lastPathComponent)…")
         let libraryName = config.library
@@ -423,7 +459,11 @@ final class AppModel: ObservableObject {
                 _ = try await list.run(library: library, dryRun: dryRun) { level, message in
                     report(.log(level, message))
                 }
+            } catch is CancellationError {
+                outcome = .stopped
+                append("Stopped.")
             } catch {
+                outcome = .failed
                 append(error.localizedDescription, isError: true)
             }
             isDownloading = false
@@ -487,6 +527,7 @@ final class AppModel: ObservableObject {
 
     func append(_ text: String, isError: Bool = false) {
         log.append(LogLine(text: text, isError: isError))
+        if isError, !isDownloading { notice = text }
         // Trimmed in steps: dropping one line per new line would shift the whole list every time.
         if log.count > 1_200 { log.removeFirst(log.count - 1_000) }
     }
@@ -535,6 +576,9 @@ final class AppModel: ObservableObject {
             }
         } catch {
             append("Couldn't change Open at Login: \(error.localizedDescription). Build the .app with scripts/build-app.sh first.", isError: true)
+            // Put the switch back to what is true. (Setting it runs this again, which then finds nothing to do.)
+            let actual = SMAppService.mainApp.status == .enabled
+            if launchAtLogin != actual { launchAtLogin = actual }
         }
     }
 

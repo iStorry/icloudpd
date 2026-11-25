@@ -59,7 +59,9 @@ struct DateBoundField: View {
             switch value {
             case .daysAgo(let d): text = "\(d)d"
             case .date(let date):
-                text = date.formatted(.iso8601.year().month().day())
+                // In this Mac's time zone, as it is read back: in UTC the day can come out one
+                // early, and reading that back would move the date a day every time this appears.
+                text = date.formatted(Date.ISO8601FormatStyle(timeZone: .current).year().month().day())
             case nil: text = ""
             }
         }
@@ -309,8 +311,15 @@ struct MenuBarContent: View {
         if model.isDownloading {
             Button("Stop") { model.stopDownload() }
         } else {
-            Button("Download Now") { model.startDownload() }
-                .disabled(model.phase != .signedIn || model.directory == nil)
+            Button("Download Now") {
+                // A run that deletes from iCloud asks first, and it asks in the window.
+                if model.config.deletesFromICloud && !model.config.dryRun {
+                    openWindow(id: "main")
+                    NSApp.activate(ignoringOtherApps: true)
+                }
+                model.startDownload()
+            }
+            .disabled(model.phase != .signedIn || model.directory == nil)
         }
         Button("Show Downloads Folder") { model.openDirectory() }
             .disabled(model.directory == nil)
