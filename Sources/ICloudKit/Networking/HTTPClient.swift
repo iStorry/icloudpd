@@ -7,6 +7,17 @@ public struct HTTPResponse {
     public let status: Int
     public let data: Data
     public let response: HTTPURLResponse
+    /// The body of a JSON response, parsed once: the error check and the caller both read it.
+    private let object: [String: Any]?
+
+    init(status: Int, data: Data, response: HTTPURLResponse) {
+        self.status = status
+        self.data = data
+        self.response = response
+        let type = (response.value(forHTTPHeaderField: "Content-Type") ?? "").split(separator: ";").first.map(String.init) ?? ""
+        isJSON = type == "application/json" || type == "text/json"
+        object = isJSON && !data.isEmpty ? (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] : nil
+    }
 
     public var isOK: Bool { (200..<400).contains(status) }
 
@@ -14,13 +25,11 @@ public struct HTTPResponse {
         response.value(forHTTPHeaderField: name)
     }
 
-    public var isJSON: Bool {
-        let type = (header("Content-Type") ?? "").split(separator: ";").first.map(String.init) ?? ""
-        return type == "application/json" || type == "text/json"
-    }
+    public let isJSON: Bool
 
     public func json() throws -> [String: Any] {
         if status == 204 || data.isEmpty { return [:] }
+        if let object { return object }
         guard let object = try? JSONSerialization.jsonObject(with: data), let dict = object as? [String: Any] else {
             throw ICloudError.unexpectedResponse("expected a JSON object (HTTP \(status))")
         }
