@@ -31,6 +31,8 @@ final class AppModel: ObservableObject {
     enum Phase: Equatable {
         case signedOut
         case signingIn
+        /// Launch with a saved sign-in: the main page is already up while iCloud confirms the session.
+        case restoring
         case needsCode
         case needsTwoStep
         case signedIn
@@ -48,6 +50,9 @@ final class AppModel: ObservableObject {
     // MARK: Account
 
     @Published var phase: Phase = .signedOut
+    /// The settings page is showing in the main window, in place of the library page.
+    @Published var showingSettings = false
+    var isInside: Bool { phase == .signedIn || phase == .restoring }
     @Published var appleID: String = UserDefaults.standard.string(forKey: "appleID") ?? ""
     @Published var domain: ICloudDomain = ICloudDomain(rawValue: UserDefaults.standard.string(forKey: "domain") ?? "") ?? .com
     @Published var rememberPassword: Bool = UserDefaults.standard.object(forKey: "rememberPassword") as? Bool ?? true
@@ -142,7 +147,10 @@ final class AppModel: ObservableObject {
         }
         // Try the saved session quietly at launch.
         if !appleID.isEmpty, defaults.bool(forKey: "wasSignedIn") {
-            Task { await signIn(password: nil) }
+            // Straight to the main page: showing the sign-in form first, only to leave it a
+            // moment later, makes every launch look like being signed out.
+            phase = .restoring
+            Task { await signIn(password: nil, restoring: true) }
         }
         reschedule()
     }
@@ -155,11 +163,11 @@ final class AppModel: ObservableObject {
 
     // MARK: Sign-in
 
-    func signIn(password typed: String?) async {
+    func signIn(password typed: String?, restoring: Bool = false) async {
         let id = appleID.trimmingCharacters(in: .whitespaces)
-        guard !id.isEmpty else { return }
+        guard !id.isEmpty else { phase = .signedOut; return }
         errorMessage = nil
-        phase = .signingIn
+        phase = restoring ? .restoring : .signingIn
         defaults.set(id, forKey: "appleID")
         defaults.set(domain.rawValue, forKey: "domain")
         defaults.set(rememberPassword, forKey: "rememberPassword")
@@ -270,6 +278,7 @@ final class AppModel: ObservableObject {
         albums = []
         // The next account starts on the start screen, not on this one's last run.
         hasRun = false
+        showingSettings = false
         notice = nil
         log = []
         resetRunCounters()
@@ -351,8 +360,9 @@ final class AppModel: ObservableObject {
 
     /// Starts a run. A run that would delete from iCloud asks first (unless `confirmed`).
     func startDownload(dryRun: Bool = false, confirmed: Bool = false, scheduled: Bool = false) {
-        guard account != nil, directory != nil, !isDownloading else { return }
+        guard account != nil, phase == .signedIn, directory != nil, !isDownloading else { return }
         notice = nil
+        showingSettings = false // the run, or the question before it, is on the library page
         var run = config
         run.dryRun = run.dryRun || dryRun
         if run.deletesFromICloud && !run.dryRun && !confirmed && !scheduled {
@@ -440,6 +450,7 @@ final class AppModel: ObservableObject {
         panel.message = "Choose a delete list: one FILENAME<TAB>SIZE<TAB>DATE per line"
         guard panel.runModal() == .OK, let url = panel.url, !isDownloading else { return }
         isDownloading = true
+        showingSettings = false
         hasRun = true
         runKind = .deleteList
         outcome = .finished

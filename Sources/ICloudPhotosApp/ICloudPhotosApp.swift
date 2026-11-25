@@ -23,15 +23,29 @@ struct ICloudPhotosApp: App {
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)
         .defaultSize(width: 980, height: 680)
-
-        Settings {
-            SettingsView().environmentObject(model)
+        // Settings are a page of the main window, so ⌘, goes there instead of opening a window.
+        .commands {
+            CommandGroup(replacing: .appSettings) { SettingsCommand(model: model) }
         }
 
         MenuBarExtra("iCloud Photos", systemImage: model.isDownloading ? "icloud.and.arrow.down.fill" : "icloud.and.arrow.down",
                      isInserted: menuBarInserted) {
             MenuBarContent().environmentObject(model)
         }
+    }
+}
+
+struct SettingsCommand: View {
+    @ObservedObject var model: AppModel
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("Settings…") {
+            openWindow(id: "main")
+            model.showingSettings = true
+        }
+        .keyboardShortcut(",", modifiers: .command)
+        .disabled(!model.isInside)
     }
 }
 

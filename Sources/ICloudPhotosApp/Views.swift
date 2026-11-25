@@ -16,7 +16,7 @@ struct RootView: View {
                     VerificationView()
                 case .needsTwoStep:
                     TwoStepView()
-                case .signedIn:
+                case .signedIn, .restoring:
                     DownloadView()
                 }
             }
@@ -366,17 +366,30 @@ struct TwoStepView: View {
 struct DownloadView: View {
     @EnvironmentObject var model: AppModel
     @State private var showingAlbums = false
+    @State private var settingsPane: SettingsPane = .general
 
     var body: some View {
         HStack(spacing: 12) {
-            sidebar
-            Group {
-                if isActive { runStage } else { readyStage }
+            // Settings take over both columns: their sections in the sidebar, the chosen one beside it.
+            if model.showingSettings {
+                SettingsSidebar(pane: $settingsPane)
+                    .transition(.opacity)
+                SettingsStage(pane: settingsPane)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .transition(.opacity)
+            } else {
+                sidebar
+                    .transition(.opacity)
+                Group {
+                    if isActive { runStage } else { readyStage }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .transition(.opacity)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .padding(12)
         .animation(.smooth(duration: 0.3), value: isActive)
+        .animation(.smooth(duration: 0.22), value: model.showingSettings)
         .sheet(isPresented: $showingAlbums) {
             AlbumPicker().environmentObject(model)
         }
@@ -440,6 +453,8 @@ struct DownloadView: View {
                                 Text(albumSummary).foregroundStyle(Theme.secondary).lineLimit(1).truncationMode(.tail)
                                 Button("Choose…") { showingAlbums = true }
                                     .buttonStyle(PillButtonStyle(kind: .secondary, height: 26))
+                                    .fixedSize() // the album names give way, not the button
+                                    .disabled(model.phase != .signedIn)
                             }
                         }
                     }
@@ -494,7 +509,7 @@ struct DownloadView: View {
                 }
             }
             Spacer(minLength: 4)
-            SettingsLink { CircleIcon(systemName: "gearshape") }
+            Button { model.showingSettings = true } label: { CircleIcon(systemName: "gearshape") }
                 .buttonStyle(.plain)
                 .help("Settings")
                 .accessibilityLabel("Settings")
@@ -503,6 +518,7 @@ struct DownloadView: View {
                     Button("Reload Libraries and Albums", systemImage: "arrow.clockwise") {
                         Task { await model.loadLibraries() }
                     }
+                    .disabled(model.phase != .signedIn)
                     Button("Sign Out", systemImage: "rectangle.portrait.and.arrow.right") { model.signOut() }
                         .disabled(model.isDownloading)
                 }
@@ -546,7 +562,17 @@ struct DownloadView: View {
                 ErrorBanner(message: notice).frame(maxWidth: 420)
             }
 
-            if let status = idleStatus {
+            if model.phase == .restoring {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Connecting to iCloud…")
+                }
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.secondary)
+                .padding(.horizontal, 14)
+                .frame(height: 34)
+                .panel(cornerRadius: 17)
+            } else if let status = idleStatus {
                 Text(status)
                     .font(.system(size: 12))
                     .foregroundStyle(Theme.secondary)
@@ -574,7 +600,7 @@ struct DownloadView: View {
             .buttonStyle(PillButtonStyle(height: large ? 50 : 44))
             .keyboardShortcut(.defaultAction)
         }
-        .disabled(model.directory == nil)
+        .disabled(model.directory == nil || model.phase != .signedIn)
     }
 
     private var idleStatus: String? {
