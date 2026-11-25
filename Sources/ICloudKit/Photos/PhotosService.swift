@@ -79,17 +79,19 @@ public final class PhotosService: @unchecked Sendable {
         return known[type]
     }
 
-    private func remember(_ libraries: [PhotoLibrary], as type: PhotoLibrary.LibraryType) {
+    private func remember(_ libraries: [PhotoLibrary]?, as type: PhotoLibrary.LibraryType) {
         knownLock.lock(); defer { knownLock.unlock() }
         known[type] = libraries
     }
 
     /// The libraries of one type. The primary library is returned as `primary` (it isn't checked again).
-    /// The answer is kept; `refresh` asks iCloud again.
+    /// A list in which every library opened cleanly is kept; `refresh` asks iCloud again.
     public func libraries(_ type: PhotoLibrary.LibraryType, refresh: Bool = false) async throws -> [PhotoLibrary] {
         if !refresh, let libraries = knownLibraries(type) { return libraries }
         let endpoint = PhotosService.endpoint(serviceRoot: serviceRoot, libraryType: type.rawValue)
         var result: [PhotoLibrary] = []
+        // A library that is still indexing may be fine by the next run, so such a list isn't kept.
+        var settled = true
         for zone in try await PhotosService.zoneIDs(http: http, endpoint: endpoint) {
             let name = zone["zoneName"] as? String
             if type == .private, name == primary.name {
@@ -100,11 +102,13 @@ public final class PhotosService: @unchecked Sendable {
             do {
                 try await library.waitForIndexing(ignore: ignoreIndexingState)
                 result.append(library)
+                if library.indexingStateIgnored { settled = false }
             } catch {
+                settled = false
                 continue // like icloudpd, a library that can't be opened is left out
             }
         }
-        remember(result, as: type)
+        remember(settled ? result : nil, as: type)
         return result
     }
 
@@ -118,8 +122,12 @@ public final class PhotosService: @unchecked Sendable {
     /// The library with this zone name. "PrimarySync" (or nil) is always the primary library.
     public func library(named name: String?) async throws -> PhotoLibrary {
         guard let name, !name.isEmpty, name != "PrimarySync", name != primary.name else { return primary }
-        if let found = try await libraries(.private).first(where: { $0.name == name }) { return found }
-        if let found = try await libraries(.shared).first(where: { $0.name == name }) { return found }
+        for type in [PhotoLibrary.LibraryType.private, .shared] {
+            if let found = knownLibraries(type)?.first(where: { $0.name == name }) { return found }
+        }
+        // Not in a list from earlier: it may be new, or have finished indexing since.
+        if let found = try await libraries(.private, refresh: true).first(where: { $0.name == name }) { return found }
+        if let found = try await libraries(.shared, refresh: true).first(where: { $0.name == name }) { return found }
         throw ICloudError.unknownLibrary(name)
     }
 }
@@ -169,16 +177,30 @@ public final class PhotoLibrary: @unchecked Sendable {
         return error.components(separatedBy: ", ").allSatisfy { $0.range(of: pattern, options: .regularExpression) != nil }
     }
 
-    func waitForIndexing(ignore: Bool) async throws {
+    /// What iCloud says about its index of this library right now.
+    func indexingState() async throws -> (state: String?, error: Any?) {
         let body: [String: Any] = ["query": ["recordType": "CheckIndexingState"], "zoneID": zoneID]
+        let response = try await post("records/query", body)
+        let record = (response["records"] as? [[String: Any]])?.first
+        let fields = record?["fields"] as? [String: Any]
+        return ((fields?["state"] as? [String: Any])?["value"] as? String, (fields?["error"] as? [String: Any])?["value"])
+    }
+
+    /// Asks once whether a library that was let through while indexing has finished since, so a
+    /// later run stops treating its listing as incomplete. No waiting, and a failed check changes nothing.
+    func recheckIndexing() async {
+        guard indexingStateIgnored, let now = try? await indexingState(), now.state == "FINISHED" else { return }
+        indexingStateIgnored = false
+    }
+
+    func waitForIndexing(ignore: Bool) async throws {
         var allIgnorable = true
         for attempt in 1...PhotoLibrary.indexingAttempts {
-            let response = try await post("records/query", body)
-            let record = (response["records"] as? [[String: Any]])?.first
-            let fields = record?["fields"] as? [String: Any]
-            let state = (fields?["state"] as? [String: Any])?["value"] as? String
-            if state == "FINISHED" { return }
-            let error = (fields?["error"] as? [String: Any])?["value"]
+            let (state, error) = try await indexingState()
+            if state == "FINISHED" {
+                indexingStateIgnored = false
+                return
+            }
             let ignorable = state == "RUNNING" || (state == "FAILED" && PhotoLibrary.isMissingContainerIndex(error))
             if !ignorable { allIgnorable = false }
             if attempt < PhotoLibrary.indexingAttempts {

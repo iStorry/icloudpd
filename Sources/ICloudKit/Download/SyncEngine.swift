@@ -367,6 +367,7 @@ public final class SyncEngine: @unchecked Sendable {
         let c = configuration
         var summary = SyncSummary()
         let library = try await photos.library(named: c.library)
+        await library.recheckIndexing()
         if library.indexingStateIgnored {
             log(.warning, "Library \(library.name) is still reported as indexing; continuing, the listing may be incomplete.")
         }
@@ -400,8 +401,9 @@ public final class SyncEngine: @unchecked Sendable {
             var stop = false
             let parallel = c.untilFound == nil ? max(1, c.concurrentDownloads) : 1
             // Deleting from iCloud moves every later asset up one place, so the next page can only
-            // be asked for once this page's deletions are done. Otherwise it is listed ahead.
-            let listsAhead = dryRun || !c.deletesFromICloud
+            // be asked for once this page's deletions are done. Until-found mostly stops within a
+            // page, so it doesn't ask for one it won't use. Otherwise the next page is listed ahead.
+            let listsAhead = c.untilFound == nil && (dryRun || !c.deletesFromICloud)
 
             // Downloads run in a window that slides over the listing: a slot freed by one asset
             // goes to the next one, also across pages, and the next page is listed meanwhile.
@@ -480,7 +482,11 @@ public final class SyncEngine: @unchecked Sendable {
                     }
 
                     if let limit, enqueued >= limit { listingDone = true }
-                    let roomForPage = listsAhead ? enqueued - listed < SyncEngine.listingWindow : enqueued == listed
+                    // Ahead, but only just: a page is asked for when the downloads are about to run
+                    // out of assets, so its download links are as fresh as when pages came one by one.
+                    let roomForPage = listsAhead
+                        ? enqueued - nextToStart < parallel && enqueued - listed < SyncEngine.listingWindow
+                        : enqueued == listed
                     if !listing, !listingDone, roomForPage {
                         listing = true
                         group.addTask { .page(try await pager.nextPage()) }
@@ -636,7 +642,7 @@ private enum SyncStep: Sendable {
 }
 
 extension SyncEngine {
-    /// How many listed assets may wait unhandled before listing pauses (three pages).
+    /// How many assets may be finished but not yet handled, behind a slow one, before listing pauses.
     static let listingWindow = 300
 }
 

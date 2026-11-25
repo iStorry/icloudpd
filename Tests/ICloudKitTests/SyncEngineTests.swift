@@ -24,6 +24,10 @@ final class FakeICloud: URLProtocol {
     /// When set, a delete request with several photos is refused as a whole, the way an atomic one is.
     nonisolated(unsafe) static var refuseBatchDeletes = false
     nonisolated(unsafe) static var modifyRequests = 0
+    nonisolated(unsafe) static var listingRequests = 0
+    nonisolated(unsafe) static var zoneListRequests = 0
+    /// Extra library zones besides PrimarySync, with the indexing state each one reports.
+    nonisolated(unsafe) static var zones: [String: String] = [:]
     /// User albums and folders by parent folder id ("" is the top level).
     nonisolated(unsafe) static var albumTree: [String: [(id: String, name: String, isFolder: Bool)]] = [:]
     static let lock = NSLock()
@@ -36,6 +40,9 @@ final class FakeICloud: URLProtocol {
         truncateFirstDownload = nil
         truncated = []
         refuseBatchDeletes = false
+        listingRequests = 0
+        zoneListRequests = 0
+        zones = [:]
         albumTree = [:]
         modifyRequests = 0
     }
@@ -148,6 +155,11 @@ final class FakeICloud: URLProtocol {
             }
             return respond(200, json: ["records": []])
         }
+        if path.hasSuffix("/zones/list") {
+            FakeICloud.zoneListRequests += 1
+            let names = path.contains("/private/") ? ["PrimarySync"] + FakeICloud.zones.keys.sorted().filter { $0 != "PrimarySync" } : []
+            return respond(200, json: ["zones": names.map { ["zoneID": ["zoneName": $0]] }])
+        }
         if path.hasSuffix("/internal/records/query/batch") {
             let live = FakeICloud.photos.filter { !$0.deleted }.count
             return respond(200, json: ["batch": [["records": [["fields": ["itemCount": ["value": live]]]]]]])
@@ -156,7 +168,8 @@ final class FakeICloud: URLProtocol {
             let query = body["query"] as? [String: Any] ?? [:]
             let type = query["recordType"] as? String
             if type == "CheckIndexingState" {
-                return respond(200, json: ["records": [["fields": ["state": ["value": "FINISHED"]]]]])
+                let zone = (body["zoneID"] as? [String: Any])?["zoneName"] as? String ?? ""
+                return respond(200, json: ["records": [["fields": ["state": ["value": FakeICloud.zones[zone] ?? "FINISHED"]]]]])
             }
             let filters = query["filterBy"] as? [[String: Any]] ?? []
             if type == "CPLAlbumByPositionLive" {
@@ -172,6 +185,7 @@ final class FakeICloud: URLProtocol {
             let start = filters.first { $0["fieldName"] as? String == "startRank" }
                 .flatMap { ($0["fieldValue"] as? [String: Any])?["value"] as? Int } ?? 0
             let limit = (body["resultsLimit"] as? Int ?? 200) / 2
+            FakeICloud.listingRequests += 1
             let deletedList = type == "CPLAssetAndMasterDeletedByExpungedDate"
             // newest first, like iCloud
             let list = FakeICloud.photos.filter { $0.deleted == deletedList }.sorted { $0.date > $1.date }
@@ -351,7 +365,9 @@ final class SyncEngineTests: XCTestCase {
 
         // One new photo on top of 250 known ones: until-found stops on the first page.
         FakeICloud.photos.append(.init(id: "new", name: "IMG_9999.JPG", date: 1_722_427_200_000 + 1000, data: Data(count: 5)))
+        FakeICloud.listingRequests = 0
         let (until, _) = try await run { $0.untilFound = 3 }
+        XCTAssertEqual(FakeICloud.listingRequests, 1) // it stops on the first page without asking for the next
         XCTAssertTrue(until.stoppedByUntilFound)
         XCTAssertEqual(until.filesDownloaded, 1)
         XCTAssertEqual(until.assetsSeen, 4)
@@ -405,6 +421,69 @@ final class SyncEngineTests: XCTestCase {
         ]
         let albums = try await service().primary.albums().filter { $0.kind == .user }.map(\.name)
         XCTAssertEqual(albums, ["Family", "Trips/Rome", "Work/Offsite", "Trips/2024/Oslo"])
+    }
+
+    /// A library list is reused, but not one that left out a library that was still indexing.
+    func testLibraryListIsOnlyKeptWhenComplete() async throws {
+        FakeICloud.zones = ["Other": "RUNNING"]
+        let photos = service()
+        let before = try await photos.libraries(.private).map(\.name)
+        XCTAssertEqual(before, ["PrimarySync"])
+
+        FakeICloud.zones = ["Other": "FINISHED"]
+        let other = try await photos.library(named: "Other")
+        XCTAssertEqual(other.name, "Other")
+
+        // Now that every library opened, looking one up again doesn't ask iCloud.
+        let requests = FakeICloud.zoneListRequests
+        _ = try await photos.library(named: "Other")
+        XCTAssertEqual(FakeICloud.zoneListRequests, requests)
+    }
+
+    /// A library that was let through while indexing is asked again by the next run.
+    func testIgnoredIndexingStateIsRechecked() async throws {
+        let photos = service()
+        func warned() async throws -> Bool {
+            let events = Events()
+            var config = SyncConfiguration(directoryPath: dir.path)
+            config.folderStructure = "none"
+            config.recent = 1
+            _ = try await SyncEngine(configuration: config) { events.add($0) }.run(photos: photos)
+            return events.logs.contains { $0.contains("still reported as indexing") }
+        }
+        FakeICloud.zones = ["PrimarySync": "RUNNING"]
+        try await photos.primary.waitForIndexing(ignore: true)
+        XCTAssertTrue(photos.primary.indexingStateIgnored)
+        let whileIndexing = try await warned()
+        XCTAssertTrue(whileIndexing)
+
+        FakeICloud.zones = [:]
+        let afterwards = try await warned()
+        XCTAssertFalse(afterwards)
+        XCTAssertFalse(photos.primary.indexingStateIgnored)
+    }
+
+    /// An answer to a request sent before signing out doesn't bring the session files back.
+    func testAnswerAfterSignOutIsDropped() async throws {
+        let store = SessionStore(directory: dir.appendingPathComponent("session"))
+        let http = HTTPClient(homeEndpoint: "https://www.icloud.com", store: store)
+        let sessionFile = store.directory.appendingPathComponent("session.json")
+        let url = URL(string: "https://fake.icloud.test/x")!
+        let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1",
+                                       headerFields: ["scnt": "abc", "Set-Cookie": "k=v; Path=/"])!
+        let sentAt = http.generation
+        http.absorb(response, url: url, generation: sentAt)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: sessionFile.path))
+
+        http.resetSession()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: sessionFile.path))
+        http.absorb(response, url: url, generation: sentAt)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: sessionFile.path))
+        XCTAssertNil(http.sessionData.scnt)
+
+        // A request sent after the reset is a new session's and is saved as usual.
+        http.absorb(response, url: url, generation: http.generation)
+        XCTAssertEqual(store.load().0.scnt, "abc")
     }
 
     func testDeleteList() async throws {

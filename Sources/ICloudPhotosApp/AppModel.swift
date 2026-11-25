@@ -360,15 +360,7 @@ final class AppModel: ObservableObject {
         downloadTask = Task {
             do {
                 let service = try await photosService()
-                let engine = try SyncEngine(configuration: run) { [events] event in
-                    // The first event of a batch schedules one update of the window; the ones
-                    // that arrive before it runs ride along.
-                    guard events.add(event) else { return }
-                    Task { @MainActor [weak self] in
-                        try? await Task.sleep(nanoseconds: AppModel.eventInterval)
-                        self?.flushEvents()
-                    }
-                }
+                let engine = try SyncEngine(configuration: run, events: eventSink())
                 // Show what the run reported before its outcome: here when it throws, below when it ends.
                 defer { flushEvents() }
                 let summary = try await engine.run(photos: service)
@@ -426,8 +418,10 @@ final class AppModel: ObservableObject {
                 let text = try String(contentsOf: url, encoding: .utf8)
                 let list = try DeleteList(contents: text, allowUndated: allowUndated, source: url.lastPathComponent)
                 let library = try await photosService().library(named: libraryName)
+                let report = eventSink()
+                defer { flushEvents() } // what the list reported comes before how it ended
                 _ = try await list.run(library: library, dryRun: dryRun) { level, message in
-                    Task { @MainActor [weak self] in self?.append(message, isError: level >= .warning) }
+                    report(.log(level, message))
                 }
             } catch {
                 append(error.localizedDescription, isError: true)
@@ -440,6 +434,18 @@ final class AppModel: ObservableObject {
     private let events = SyncEventBuffer()
     /// The window follows a run ten times a second, however many events the run sends.
     static let eventInterval: UInt64 = 100_000_000
+
+    /// Where a run sends its events, from whichever task they come. The first event of a batch
+    /// schedules one update of the window; the ones that arrive before it runs ride along, in order.
+    private func eventSink() -> @Sendable (SyncEvent) -> Void {
+        { [events, weak self] event in
+            guard events.add(event) else { return }
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: AppModel.eventInterval)
+                self?.flushEvents()
+            }
+        }
+    }
 
     private func flushEvents() {
         for event in events.drain() { handle(event) }

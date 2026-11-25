@@ -78,12 +78,21 @@ public final class HTTPClient: @unchecked Sendable {
     }
 
     public func resetSession() {
+        // After a save that is under way, so it can't put the files back once they are removed.
+        persistLock.lock()
+        defer { persistLock.unlock() }
         lock.lock()
         _sessionData = SessionData()
         jar.removeAll()
+        _generation += 1
         lock.unlock()
         store?.clear()
     }
+
+    /// Counts the resets. A request notes it when it is sent, and its answer is dropped when a
+    /// reset came in between: an answer that arrives after signing out belongs to the old session.
+    private var _generation = 0
+    var generation: Int { lock.lock(); defer { lock.unlock() }; return _generation }
 
     /// Held from taking the snapshot until it is on disk, so two saves can't land out of order
     /// and leave an older session in the file.
@@ -117,8 +126,12 @@ public final class HTTPClient: @unchecked Sendable {
 
     /// Saves cookies and the X-Apple-* session headers from a response. The session files are
     /// only rewritten when the response changed something: photo downloads never do.
-    func absorb(_ response: HTTPURLResponse, url: URL) {
+    func absorb(_ response: HTTPURLResponse, url: URL, generation: Int? = nil) {
         lock.lock()
+        if let generation, generation != _generation {
+            lock.unlock()
+            return
+        }
         let sessionBefore = _sessionData
         let cookiesChanged = jar.store(from: response, url: url)
         func capture(_ header: String, _ apply: (inout SessionData, String) -> Void) {
@@ -139,12 +152,13 @@ public final class HTTPClient: @unchecked Sendable {
     @discardableResult
     public func send(_ method: String, _ url: URL, headers: [String: String] = [:], body: Data? = nil,
                      checkErrors: Bool = true) async throws -> HTTPResponse {
+        let generation = self.generation
         let request = makeRequest(method, url, headers: headers, body: body)
         let (data, urlResponse) = try await urlSession.compatData(for: request)
         guard let http = urlResponse as? HTTPURLResponse else {
             throw ICloudError.unexpectedResponse("not an HTTP response")
         }
-        absorb(http, url: url)
+        absorb(http, url: url, generation: generation)
         let response = HTTPResponse(status: http.statusCode, data: data, response: http)
         if checkErrors { try HTTPClient.check(response) }
         return response
@@ -201,9 +215,10 @@ public final class HTTPClient: @unchecked Sendable {
         let existing = (try? FileManager.default.attributesOfItem(atPath: partURL.path)[.size] as? NSNumber)?.intValue ?? 0
         var headers: [String: String] = [:]
         if existing > 0 { headers["Range"] = "bytes=\(existing)-" }
+        let generation = self.generation
         let request = makeRequest("GET", url, headers: headers, body: nil)
         let (status, response) = try await DownloadRouter.shared.run(request, to: partURL, existingBytes: existing, progress: progress)
-        absorb(response, url: url)
+        absorb(response, url: url, generation: generation)
         return status
     }
 }
