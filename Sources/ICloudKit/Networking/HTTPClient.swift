@@ -76,12 +76,19 @@ public final class HTTPClient: @unchecked Sendable {
         store?.clear()
     }
 
+    /// Held from taking the snapshot until it is on disk, so two saves can't land out of order
+    /// and leave an older session in the file.
+    private let persistLock = NSLock()
+
     private func persist() {
+        guard let store else { return }
+        persistLock.lock()
+        defer { persistLock.unlock() }
         lock.lock()
         let session = _sessionData
         let cookies = jar.cookies
         lock.unlock()
-        store?.save(session: session, cookies: cookies)
+        store.save(session: session, cookies: cookies)
     }
 
     func makeRequest(_ method: String, _ url: URL, headers: [String: String], body: Data?) -> URLRequest {
@@ -99,10 +106,12 @@ public final class HTTPClient: @unchecked Sendable {
         return request
     }
 
-    /// Saves cookies and the X-Apple-* session headers from a response.
+    /// Saves cookies and the X-Apple-* session headers from a response. The session files are
+    /// only rewritten when the response changed something: photo downloads never do.
     func absorb(_ response: HTTPURLResponse, url: URL) {
         lock.lock()
-        jar.store(from: response, url: url)
+        let sessionBefore = _sessionData
+        let cookiesChanged = jar.store(from: response, url: url)
         func capture(_ header: String, _ apply: (inout SessionData, String) -> Void) {
             if let value = response.value(forHTTPHeaderField: header), !value.isEmpty { apply(&_sessionData, value) }
         }
@@ -111,8 +120,9 @@ public final class HTTPClient: @unchecked Sendable {
         capture("X-Apple-Session-Token") { $0.sessionToken = $1 }
         capture("X-Apple-TwoSV-Trust-Token") { $0.trustToken = $1 }
         capture("scnt") { $0.scnt = $1 }
+        let changed = cookiesChanged || _sessionData != sessionBefore
         lock.unlock()
-        persist()
+        if changed { persist() }
     }
 
     /// Sends a request. With `checkErrors` (the default) it throws the way pyicloud_ipd
@@ -179,6 +189,7 @@ public final class HTTPClient: @unchecked Sendable {
     /// (with an HTTP Range request) when there is one. Returns the HTTP status.
     public func downloadFile(_ url: URL, to partURL: URL,
                              progress: (@Sendable (Int) -> Void)? = nil) async throws -> Int {
+        // `progress` runs once per network chunk, on the queue every download shares: keep it cheap.
         let existing = (try? FileManager.default.attributesOfItem(atPath: partURL.path)[.size] as? NSNumber)?.intValue ?? 0
         var headers: [String: String] = [:]
         if existing > 0 { headers["Range"] = "bytes=\(existing)-" }

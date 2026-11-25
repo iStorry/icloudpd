@@ -36,8 +36,12 @@ public final class CookieJar {
         self.cookies = cookies
     }
 
-    /// Stores the cookies from a response's Set-Cookie headers.
-    public func store(from response: HTTPURLResponse, url: URL, now: Date = Date()) {
+    /// Stores the cookies from a response's Set-Cookie headers. Returns true when the jar changed.
+    @discardableResult
+    public func store(from response: HTTPURLResponse, url: URL, now: Date = Date()) -> Bool {
+        // Most responses (every photo download) set no cookies at all.
+        guard response.value(forHTTPHeaderField: "Set-Cookie") != nil else { return false }
+        let before = cookies
         var fields: [String: String] = [:]
         for (key, value) in response.allHeaderFields {
             if let k = key as? String, let v = value as? String { fields[k] = v }
@@ -55,6 +59,7 @@ public final class CookieJar {
             if let expires = stored.expires, expires < now { continue } // a deletion
             cookies.append(stored)
         }
+        return cookies != before
     }
 
     /// The Cookie header value for a request to `url`, or nil when nothing matches.

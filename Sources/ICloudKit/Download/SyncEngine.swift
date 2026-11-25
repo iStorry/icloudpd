@@ -19,7 +19,6 @@ public enum SyncEvent: Sendable {
     case wouldDownload(path: String)
     case alreadyExists(path: String)
     case failed(name: String, message: String)
-    case bytesReceived(Int)
     case deletedLocally(path: String)
     case deletedFromICloud(name: String)
     case pruned(path: String)
@@ -303,9 +302,7 @@ public final class SyncEngine: @unchecked Sendable {
         var lastError: Error = ICloudError.unexpectedResponse("download")
         for attempt in 1...attempts {
             do {
-                let status = try await http.downloadFile(file.version.url, to: part) { [emit] bytes in
-                    emit(.bytesReceived(bytes))
-                }
+                let status = try await http.downloadFile(file.version.url, to: part)
                 if status == 416 {
                     // The partial file is complete or stale. Keep it if the size is right, otherwise start over.
                     if fileSize(part) != file.version.size {
@@ -369,68 +366,99 @@ public final class SyncEngine: @unchecked Sendable {
             log(.info, "Looking up \(c.skipVideos ? "photos" : c.skipPhotos ? "videos" : "photos and videos")\(album.name.isEmpty ? "" : " from album \(album.name)")...")
 
             let pager = album.pager()
+            /// Assets whose results have been handled; also the listing position of the next one to handle.
             var listed = 0
             var consecutiveFound = 0
             var stop = false
             let parallel = c.untilFound == nil ? max(1, c.concurrentDownloads) : 1
+            // Deleting from iCloud moves every later asset up one place, so the next page can only
+            // be asked for once this page's deletions are done. Otherwise it is listed ahead.
+            let listsAhead = dryRun || !c.deletesFromICloud
 
-            while !stop, let page = try await pager.nextPage() {
-                try Task.checkCancellation()
-                var batch = page
-                if let limit, listed + batch.count > limit { batch = Array(batch.prefix(max(0, limit - listed))) }
-                let passed = batch.map { passes($0, now: now) }
+            // Downloads run in a window that slides over the listing: a slot freed by one asset
+            // goes to the next one, also across pages, and the next page is listed meanwhile.
+            // Results are still handled in listing order.
+            try await withThrowingTaskGroup(of: SyncStep.self) { group in
+                var slots: [Int: AssetSlot] = [:]
+                var enqueued = 0
+                var nextToStart = 0
+                var downloading = 0
+                var listing = false
+                var listingDone = false
 
-                // Download the page's assets in parallel, then handle the results in order.
-                let results = try await withThrowingTaskGroup(of: (Int, AssetResult).self) { group -> [AssetResult?] in
-                    var output = [AssetResult?](repeating: nil, count: batch.count)
-                    var next = 0
-                    func addNext() {
-                        while next < batch.count && !passed[next] { next += 1 }
-                        guard next < batch.count else { return }
-                        let index = next
-                        let asset = batch[index]
-                        next += 1
-                        group.addTask { (index, try await self.process(asset, http: photos.http)) }
+                while true {
+                    try Task.checkCancellation()
+
+                    let handledBefore = listed
+                    while listed < enqueued {
+                        if let n = c.untilFound, consecutiveFound >= n {
+                            log(.info, "Found \(n) consecutive previously downloaded photos. Exiting")
+                            summary.stoppedByUntilFound = true
+                            stop = true
+                            break
+                        }
+                        guard let slot = slots[listed], !slot.passed || slot.result != nil else { break }
+                        slots[listed] = nil
+                        listed += 1
+                        summary.assetsSeen += 1
+                        let result = slot.result
+                        if let result {
+                            summary.filesDownloaded += result.createdPaths.filter { !$0.hasSuffix(".xmp") }.count
+                            summary.bytesDownloaded += result.bytes
+                            summary.filesFailed += result.failures
+                            summary.filesExisting += result.foundExisting ? 1 : 0
+                            if result.foundMissing { consecutiveFound = 0 }
+                            else if result.foundExisting { consecutiveFound += 1 }
+                            if prune != nil, !result.present { pruneComplete = false }
+                        } else {
+                            summary.assetsFiltered += 1
+                        }
+                        prune?.record(assetID: slot.asset.id, paths: result?.expectedPaths ?? [])
+
+                        if try await handleICloudDeletion(slot.asset, passed: slot.passed, result: result, library: library, now: now) {
+                            summary.deletedFromICloud += 1
+                            if !dryRun { pager.adjustOffset(by: -1) }
+                        }
                     }
-                    for _ in 0..<parallel { addNext() }
-                    while let (index, result) = try await group.next() {
-                        output[index] = result
-                        addNext()
-                    }
-                    return output
-                }
-
-                for (index, asset) in batch.enumerated() {
-                    if let n = c.untilFound, consecutiveFound >= n {
-                        log(.info, "Found \(n) consecutive previously downloaded photos. Exiting")
-                        summary.stoppedByUntilFound = true
-                        stop = true
+                    if listed != handledBefore { emit(.progress(processed: listed)) }
+                    if stop {
+                        group.cancelAll()
                         break
                     }
-                    listed += 1
-                    summary.assetsSeen += 1
-                    let result = results[index]
-                    if let result {
-                        summary.filesDownloaded += result.createdPaths.filter { !$0.hasSuffix(".xmp") }.count
-                        summary.bytesDownloaded += result.bytes
-                        summary.filesFailed += result.failures
-                        summary.filesExisting += result.foundExisting ? 1 : 0
-                        if result.foundMissing { consecutiveFound = 0 }
-                        else if result.foundExisting { consecutiveFound += 1 }
-                        if prune != nil, !result.present { pruneComplete = false }
-                    } else {
-                        summary.assetsFiltered += 1
-                    }
-                    prune?.record(assetID: asset.id, paths: result?.expectedPaths ?? [])
 
-                    if try await handleICloudDeletion(asset, passed: passed[index], result: result, library: library, now: now) {
-                        summary.deletedFromICloud += 1
-                        if !dryRun { pager.adjustOffset(by: -1) }
+                    while downloading < parallel, nextToStart < enqueued {
+                        let index = nextToStart
+                        nextToStart += 1
+                        guard let slot = slots[index], slot.passed else { continue }
+                        let asset = slot.asset
+                        downloading += 1
+                        group.addTask { .asset(index, try await self.process(asset, http: photos.http)) }
+                    }
+
+                    if let limit, enqueued >= limit { listingDone = true }
+                    let roomForPage = listsAhead ? enqueued - listed < SyncEngine.listingWindow : enqueued == listed
+                    if !listing, !listingDone, roomForPage {
+                        listing = true
+                        group.addTask { .page(try await pager.nextPage()) }
+                    }
+
+                    guard let step = try await group.next() else { break }
+                    switch step {
+                    case .asset(let index, let result):
+                        downloading -= 1
+                        slots[index]?.result = result
+                    case .page(let page):
+                        listing = false
+                        guard var batch = page else { listingDone = true; break }
+                        if let limit { batch = Array(batch.prefix(max(0, limit - enqueued))) }
+                        for asset in batch {
+                            slots[enqueued] = AssetSlot(asset: asset, passed: passes(asset, now: now))
+                            enqueued += 1
+                        }
                     }
                 }
-                emit(.progress(processed: listed))
-                if let limit, listed >= limit { stop = true }
             }
+            if let limit, listed >= limit { stop = true }
             if !stop, let total, listed < total, prune != nil { pruneComplete = false }
         }
 
@@ -533,6 +561,25 @@ public final class SyncEngine: @unchecked Sendable {
         }
         return deleted
     }
+}
+
+/// One listed asset waiting for its turn: `result` is set once its files are done.
+private struct AssetSlot {
+    let asset: PhotoAsset
+    /// False when a filter leaves the asset out; it is then counted without downloading.
+    let passed: Bool
+    var result: AssetResult?
+}
+
+/// What a task of the run's group finished: one asset's files, or the listing of the next page.
+private enum SyncStep: Sendable {
+    case asset(Int, AssetResult)
+    case page([PhotoAsset]?)
+}
+
+extension SyncEngine {
+    /// How many listed assets may wait unhandled before listing pauses (three pages).
+    static let listingWindow = 300
 }
 
 /// Paths claimed by downloads in flight, with their expected sizes.

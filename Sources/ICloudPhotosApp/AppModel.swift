@@ -360,10 +360,19 @@ final class AppModel: ObservableObject {
         downloadTask = Task {
             do {
                 let service = try await photosService()
-                let engine = try SyncEngine(configuration: run) { event in
-                    Task { @MainActor [weak self] in self?.handle(event) }
+                let engine = try SyncEngine(configuration: run) { [events] event in
+                    // The first event of a batch schedules one update of the window; the ones
+                    // that arrive before it runs ride along.
+                    guard events.add(event) else { return }
+                    Task { @MainActor [weak self] in
+                        try? await Task.sleep(nanoseconds: AppModel.eventInterval)
+                        self?.flushEvents()
+                    }
                 }
+                // Show what the run reported before its outcome: here when it throws, below when it ends.
+                defer { flushEvents() }
                 let summary = try await engine.run(photos: service)
+                flushEvents()
                 var parts = ["\(summary.filesDownloaded) new", "\(summary.filesExisting) already saved"]
                 if summary.filesFailed > 0 { parts.append("\(summary.filesFailed) failed") }
                 if summary.deletedFromICloud > 0 { parts.append("\(summary.deletedFromICloud) \(run.dryRun ? "would be " : "")deleted from iCloud") }
@@ -427,6 +436,15 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Events of the run that haven't reached the window yet.
+    private let events = SyncEventBuffer()
+    /// The window follows a run ten times a second, however many events the run sends.
+    static let eventInterval: UInt64 = 100_000_000
+
+    private func flushEvents() {
+        for event in events.drain() { handle(event) }
+    }
+
     private func handle(_ event: SyncEvent) {
         switch event {
         case .log(let level, let message):
@@ -450,8 +468,6 @@ final class AppModel: ObservableObject {
         case .failed(let name, let message):
             failed += 1
             append("\(name): \(message)", isError: true)
-        case .bytesReceived:
-            break
         case .deletedLocally(let path):
             deletedLocally += 1
             append("\(currentDryRun ? "Would remove" : "Removed") \(path) (deleted in iCloud)")
@@ -523,6 +539,26 @@ final class AppModel: ObservableObject {
         }
         if let lastRun { return "Last run \(lastRun.formatted(.relative(presentation: .named)))" }
         return "Not run yet"
+    }
+}
+
+/// Collects the events a run sends from its download tasks, in order, until the main actor takes them.
+final class SyncEventBuffer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var pending: [SyncEvent] = []
+
+    /// Returns true when this is the first event since the last `drain`, so the caller schedules one.
+    func add(_ event: SyncEvent) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        pending.append(event)
+        return pending.count == 1
+    }
+
+    func drain() -> [SyncEvent] {
+        lock.lock(); defer { lock.unlock() }
+        let events = pending
+        pending = []
+        return events
     }
 }
 #endif

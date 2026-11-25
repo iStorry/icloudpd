@@ -299,6 +299,57 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertTrue(files().contains("IMG_1-20.JPG") || files().contains("IMG_1-10.JPG"))
     }
 
+    /// 250 photos are three pages of the listing: downloads go on from one page into the next.
+    func testDownloadsAcrossPages() async throws {
+        FakeICloud.reset((0..<250).map { i in
+            FakeICloud.Photo(id: "p\(i)", name: String(format: "IMG_%04d.JPG", i), date: 1_722_427_200_000 - Double(i) * 1000,
+                             data: Data(repeating: UInt8(i % 251), count: 20 + i))
+        })
+        let (first, events) = try await run { $0.concurrentDownloads = 8 }
+        XCTAssertEqual(first.assetsSeen, 250)
+        XCTAssertEqual(first.filesDownloaded, 250)
+        XCTAssertEqual(files().count, 250)
+        XCTAssertEqual(try Data(contentsOf: dir.appendingPathComponent("IMG_0249.JPG")), Data(repeating: 249, count: 269))
+        // Progress only ever moves forward, and ends on the last photo.
+        let progress = events.all.compactMap { if case .progress(let n) = $0 { return n } else { return nil } }
+        XCTAssertEqual(progress, progress.sorted())
+        XCTAssertEqual(progress.last, 250)
+
+        // One new photo on top of 250 known ones: until-found stops on the first page.
+        FakeICloud.photos.append(.init(id: "new", name: "IMG_9999.JPG", date: 1_722_427_200_000 + 1000, data: Data(count: 5)))
+        let (until, _) = try await run { $0.untilFound = 3 }
+        XCTAssertTrue(until.stoppedByUntilFound)
+        XCTAssertEqual(until.filesDownloaded, 1)
+        XCTAssertEqual(until.assetsSeen, 4)
+
+        // Move mode deletes as it goes, which shifts the listing: no photo may be skipped.
+        let (move, _) = try await run { $0.keepICloudRecentDays = 0 }
+        XCTAssertEqual(move.assetsSeen, 251)
+        XCTAssertEqual(move.deletedFromICloud, 251)
+        XCTAssertEqual(Set(FakeICloud.deleteRequests).count, 251)
+    }
+
+    /// The session files are written when a response changes the session, not on every response.
+    func testSessionIsSavedOnlyWhenItChanges() async throws {
+        let store = SessionStore(directory: dir.appendingPathComponent("session"))
+        let http = HTTPClient(homeEndpoint: "https://www.icloud.com", store: store)
+        let sessionFile = store.directory.appendingPathComponent("session.json")
+        let url = URL(string: "https://fake.icloud.test/file/p1/x")!
+
+        _ = try await http.downloadFile(url, to: dir.appendingPathComponent("a.part"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: sessionFile.path))
+
+        let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1",
+                                       headerFields: ["scnt": "abc", "Set-Cookie": "k=v; Path=/"])!
+        http.absorb(response, url: url)
+        XCTAssertEqual(store.load().0.scnt, "abc")
+        XCTAssertEqual(store.load().1.map(\.name), ["k"])
+
+        try FileManager.default.removeItem(at: sessionFile)
+        http.absorb(response, url: url) // the same again changes nothing
+        XCTAssertFalse(FileManager.default.fileExists(atPath: sessionFile.path))
+    }
+
     func testDeleteList() async throws {
         let list = try DeleteList(contents: "IMG_0001.JPG\t1001\t\(1_722_427_200 - 86_400)\nIMG_7777.JPG\t1\t1722427200\n")
         let summary = try await list.run(library: service().primary, dryRun: false) { _, _ in }
