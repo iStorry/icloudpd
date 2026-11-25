@@ -1,0 +1,18 @@
+{"records":[
+ {"recordName":"M1","recordType":"CPLMaster","fields":{
+   "filenameEnc":{"type":"ENCRYPTED_BYTES","value":"SU1HXzAwMDEuSEVJQw=="},
+   "itemType":{"value":"public.heic"},
+   "resOriginalRes":{"value":{"size":1000,"downloadURL":"https://cvws.icloud-content.com/B/abc/${f}?o=1","fileChecksum":"c1"}},
+   "resOriginalFileType":{"value":"public.heic"},
+   "resOriginalVidComplRes":{"value":{"size":500,"downloadURL":"https://cvws.icloud-content.com/B/def/${f}?o=2","fileChecksum":"c2"}},
+   "resOriginalVidComplFileType":{"value":"com.apple.quicktime-movie"}}},
+ {"recordName":"A1","recordType":"CPLAsset","fields":{"masterRef":{"value":{"recordName":"M1"}},"assetDate":{"value":1722427200000},"assetSubtypeV2":{"value":0}}},
+ {"recordName":"A1dup","recordType":"CPLAsset","fields":{"masterRef":{"value":{"recordName":"M1"}},"assetDate":{"value":1722427200000}}},
+ {"recordName":"M2","recordType":"CPLMaster","fields":{
+   "filenameEnc":{"type":"STRING","value":"clip:1.mov"},
+   "itemType":{"value":"com.apple.quicktime-movie"},
+   "resOriginalRes":{"value":{"size":7,"downloadURL":"https://example.com/v","fileChecksum":"c3"}},
+   "resOriginalFileType":{"value":"com.apple.quicktime-movie"}}},
+ {"recordName":"A2","recordType":"CPLAsset","fields":{"masterRef":{"value":{"recordName":"M2"}},"assetDate":{"value":0},"assetSubtypeV2":{"value":3}}},
+ {"recordName":"A3","recordType":"CPLAsset","fields":{"masterRef":{"value":{"recordName":"MISSING"}}}}
+]}
