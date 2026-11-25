@@ -481,7 +481,8 @@ final class AppModel: ObservableObject {
 
     func append(_ text: String, isError: Bool = false) {
         log.append(LogLine(text: text, isError: isError))
-        if log.count > 1_000 { log.removeFirst(log.count - 1_000) }
+        // Trimmed in steps: dropping one line per new line would shift the whole list every time.
+        if log.count > 1_200 { log.removeFirst(log.count - 1_000) }
     }
 
     // MARK: Schedule, notifications, login item

@@ -62,6 +62,10 @@ public final class SyncEngine: @unchecked Sendable {
     let fileManager = FileManager.default
     private let reservations = PathReservations()
     private let folders = FolderSizes()
+    // Worked out once for the run rather than for every photo.
+    private let calendar: Calendar
+    private let excluded: [NSRegularExpression]
+    private let rootPaths: [String]
     var reservationsForTests: PathReservations { reservations }
 
     public init(configuration: SyncConfiguration, timeZone: TimeZone = .current,
@@ -70,6 +74,9 @@ public final class SyncEngine: @unchecked Sendable {
         self.configuration = configuration
         self.timeZone = timeZone
         self.folderFormat = try FolderFormat(configuration.folderStructure)
+        self.calendar = Strftime.calendar(timeZone)
+        self.excluded = configuration.excludeFilenames.compactMap(FilenamePolicy.globExpression)
+        self.rootPaths = [configuration.directory, configuration.livePhotoDirectory].compactMap { $0?.standardizedFileURL.path }
         self.emit = events
     }
 
@@ -88,9 +95,10 @@ public final class SyncEngine: @unchecked Sendable {
         if c.skipScreenshots && asset.isScreenshot { return false }
         if let before = c.skipCreatedBefore, asset.createdDate < before.resolve(now: now) { return false }
         if let after = c.skipCreatedAfter, asset.createdDate > after.resolve(now: now) { return false }
-        if !c.excludeFilenames.isEmpty {
+        if !excluded.isEmpty {
             let name = baseFilename(asset)
-            if c.excludeFilenames.contains(where: { FilenamePolicy.globMatches($0, name) }) { return false }
+            let whole = NSRange(name.startIndex..., in: name)
+            if excluded.contains(where: { $0.firstMatch(in: name, range: whole) != nil }) { return false }
         }
         return true
     }
@@ -103,7 +111,7 @@ public final class SyncEngine: @unchecked Sendable {
     }
 
     func datePath(_ asset: PhotoAsset) -> [String] {
-        folderFormat.components(for: asset.createdDate, timeZone: timeZone)
+        folderFormat.components(for: asset.createdDate, calendar: calendar)
     }
 
     func url(in root: URL, _ components: [String], _ filename: String) -> URL {
@@ -113,10 +121,9 @@ public final class SyncEngine: @unchecked Sendable {
     }
 
     func relative(_ url: URL) -> String {
-        for root in [configuration.directory, configuration.livePhotoDirectory].compactMap({ $0 }) {
-            let base = root.standardizedFileURL.path
-            let full = url.standardizedFileURL.path
-            if full.hasPrefix(base + "/") { return String(full.dropFirst(base.count + 1)) }
+        let full = url.standardizedFileURL.path
+        for base in rootPaths where full.hasPrefix(base + "/") {
+            return String(full.dropFirst(base.count + 1))
         }
         return url.path
     }

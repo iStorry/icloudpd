@@ -24,6 +24,8 @@ final class FakeICloud: URLProtocol {
     /// When set, a delete request with several photos is refused as a whole, the way an atomic one is.
     nonisolated(unsafe) static var refuseBatchDeletes = false
     nonisolated(unsafe) static var modifyRequests = 0
+    /// User albums and folders by parent folder id ("" is the top level).
+    nonisolated(unsafe) static var albumTree: [String: [(id: String, name: String, isFolder: Bool)]] = [:]
     static let lock = NSLock()
 
     static func reset(_ photos: [Photo]) {
@@ -34,6 +36,7 @@ final class FakeICloud: URLProtocol {
         truncateFirstDownload = nil
         truncated = []
         refuseBatchDeletes = false
+        albumTree = [:]
         modifyRequests = 0
     }
 
@@ -156,6 +159,16 @@ final class FakeICloud: URLProtocol {
                 return respond(200, json: ["records": [["fields": ["state": ["value": "FINISHED"]]]]])
             }
             let filters = query["filterBy"] as? [[String: Any]] ?? []
+            if type == "CPLAlbumByPositionLive" {
+                let parent = filters.first { $0["fieldName"] as? String == "parentId" }
+                    .flatMap { ($0["fieldValue"] as? [String: Any])?["value"] as? String } ?? ""
+                return respond(200, json: ["records": (FakeICloud.albumTree[parent] ?? []).map { item in
+                    ["recordName": item.id, "fields": [
+                        "albumNameEnc": ["value": Data(item.name.utf8).base64EncodedString()],
+                        "albumType": ["value": item.isFolder ? 3 : 0],
+                    ]]
+                }])
+            }
             let start = filters.first { $0["fieldName"] as? String == "startRank" }
                 .flatMap { ($0["fieldValue"] as? [String: Any])?["value"] as? Int } ?? 0
             let limit = (body["resultsLimit"] as? Int ?? 200) / 2
@@ -379,6 +392,19 @@ final class SyncEngineTests: XCTestCase {
         let (summary, _) = try await run()
         XCTAssertEqual(summary.filesDownloaded, 1)
         XCTAssertEqual(try Data(contentsOf: dir.appendingPathComponent("IMG_0001.MOV")), big)
+    }
+
+    /// Folders are walked a level at a time, several at once; the albums come out in the same order.
+    func testAlbumsInsideFolders() async throws {
+        FakeICloud.albumTree = [
+            "": [("f1", "Trips", true), ("a", "Family", false), ("f2", "Work", true)]
+                + (0..<6).map { ("e\($0)", "Empty \($0)", true) },
+            "f1": [("b", "Rome", false), ("f3", "2024", true)],
+            "f2": [("c", "Offsite", false)],
+            "f3": [("d", "Oslo", false)],
+        ]
+        let albums = try await service().primary.albums().filter { $0.kind == .user }.map(\.name)
+        XCTAssertEqual(albums, ["Family", "Trips/Rome", "Work/Offsite", "Trips/2024/Oslo"])
     }
 
     func testDeleteList() async throws {

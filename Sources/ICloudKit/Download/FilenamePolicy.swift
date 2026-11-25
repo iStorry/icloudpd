@@ -74,17 +74,26 @@ public struct FolderFormat: Equatable, Sendable {
 
     /// The relative folder path for `date` ("" for none).
     public func path(for date: Date, timeZone: TimeZone = .current) -> String {
+        isNone ? "" : path(for: date, calendar: Strftime.calendar(timeZone))
+    }
+
+    /// With a calendar from `Strftime.calendar`, so a run makes one instead of one per photo.
+    func path(for date: Date, calendar: Calendar) -> String {
         if isNone { return "" }
         return pieces.map { piece in
             switch piece {
             case .literal(let s): return s
-            case .strftime(let f): return Strftime.format(f, date: date, timeZone: timeZone)
+            case .strftime(let f): return Strftime.format(f, date: date, calendar: calendar)
             }
         }.joined()
     }
 
     public func components(for date: Date, timeZone: TimeZone = .current) -> [String] {
-        path(for: date, timeZone: timeZone).split(separator: "/").map(String.init).filter { !$0.isEmpty && $0 != "." }
+        isNone ? [] : components(for: date, calendar: Strftime.calendar(timeZone))
+    }
+
+    func components(for date: Date, calendar: Calendar) -> [String] {
+        path(for: date, calendar: calendar).split(separator: "/").map(String.init).filter { !$0.isEmpty && $0 != "." }
     }
 }
 
@@ -94,14 +103,21 @@ enum Strftime {
                          "October", "November", "December"]
     static let weekdays = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
 
-    static func format(_ format: String, date: Date, timeZone: TimeZone) -> String {
+    static func calendar(_ timeZone: TimeZone) -> Calendar {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = timeZone
+        return calendar
+    }
+
+    static func format(_ format: String, date: Date, timeZone: TimeZone) -> String {
+        self.format(format, date: date, calendar: calendar(timeZone))
+    }
+
+    static func format(_ format: String, date: Date, calendar: Calendar) -> String {
         let c = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second, .weekday], from: date)
         let year = c.year ?? 1970, month = c.month ?? 1, day = c.day ?? 1
         let hour = c.hour ?? 0, minute = c.minute ?? 0, second = c.second ?? 0
         let weekday = (c.weekday ?? 1) - 1
-        let dayOfYear = calendar.ordinality(of: .day, in: .year, for: date) ?? 1
         func pad(_ v: Int, _ width: Int = 2) -> String { String(format: "%0\(width)d", v) }
 
         var out = ""
@@ -127,7 +143,7 @@ enum Strftime {
             case "A": out += weekdays[weekday]
             case "a": out += String(weekdays[weekday].prefix(3))
             case "w": out += String(weekday)
-            case "j": out += pad(dayOfYear, 3)
+            case "j": out += pad(calendar.ordinality(of: .day, in: .year, for: date) ?? 1, 3)
             case "%": out += "%"
             default: out += "%" + String(d)
             }
@@ -253,6 +269,16 @@ public enum FilenamePolicy {
 
     /// Glob match ignoring case (`--exclude-filename`), with *, ? and [...] like fnmatch.
     public static func globMatches(_ pattern: String, _ name: String) -> Bool {
+        name.range(of: globRegex(pattern), options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
+    /// The glob compiled once, for matching many names. Nil when the pattern isn't a valid one,
+    /// which then matches nothing.
+    static func globExpression(_ pattern: String) -> NSRegularExpression? {
+        try? NSRegularExpression(pattern: globRegex(pattern), options: [.caseInsensitive])
+    }
+
+    static func globRegex(_ pattern: String) -> String {
         var regex = "^"
         var i = pattern.startIndex
         while i < pattern.endIndex {
@@ -274,6 +300,6 @@ public enum FilenamePolicy {
             i = pattern.index(after: i)
         }
         regex += "$"
-        return name.range(of: regex, options: [.regularExpression, .caseInsensitive]) != nil
+        return regex
     }
 }

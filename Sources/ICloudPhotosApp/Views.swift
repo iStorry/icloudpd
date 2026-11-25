@@ -907,8 +907,9 @@ struct ActivityList: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .panel()
             .clipShape(.rect(cornerRadius: 16, style: .continuous))
-            .onChange(of: lines.count) { _, _ in
-                if let last = lines.last { proxy.scrollTo(last.id, anchor: .bottom) }
+            // The newest line, not the count: the count stops changing once old lines are dropped.
+            .onChange(of: lines.last?.id) { _, last in
+                if let last { proxy.scrollTo(last, anchor: .bottom) }
             }
         }
     }

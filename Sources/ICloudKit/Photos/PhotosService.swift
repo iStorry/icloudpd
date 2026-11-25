@@ -70,8 +70,24 @@ public final class PhotosService: @unchecked Sendable {
         }
     }
 
+    /// The libraries found so far, by type: looking one up by name doesn't ask iCloud again.
+    private var known: [PhotoLibrary.LibraryType: [PhotoLibrary]] = [:]
+    private let knownLock = NSLock()
+
+    private func knownLibraries(_ type: PhotoLibrary.LibraryType) -> [PhotoLibrary]? {
+        knownLock.lock(); defer { knownLock.unlock() }
+        return known[type]
+    }
+
+    private func remember(_ libraries: [PhotoLibrary], as type: PhotoLibrary.LibraryType) {
+        knownLock.lock(); defer { knownLock.unlock() }
+        known[type] = libraries
+    }
+
     /// The libraries of one type. The primary library is returned as `primary` (it isn't checked again).
-    public func libraries(_ type: PhotoLibrary.LibraryType) async throws -> [PhotoLibrary] {
+    /// The answer is kept; `refresh` asks iCloud again.
+    public func libraries(_ type: PhotoLibrary.LibraryType, refresh: Bool = false) async throws -> [PhotoLibrary] {
+        if !refresh, let libraries = knownLibraries(type) { return libraries }
         let endpoint = PhotosService.endpoint(serviceRoot: serviceRoot, libraryType: type.rawValue)
         var result: [PhotoLibrary] = []
         for zone in try await PhotosService.zoneIDs(http: http, endpoint: endpoint) {
@@ -88,13 +104,14 @@ public final class PhotosService: @unchecked Sendable {
                 continue // like icloudpd, a library that can't be opened is left out
             }
         }
+        remember(result, as: type)
         return result
     }
 
-    /// Private and shared libraries (the names icloudpd's --list-libraries prints).
+    /// Private and shared libraries (the names icloudpd's --list-libraries prints), fresh from iCloud.
     public func allLibraries() async throws -> [PhotoLibrary] {
-        let privates = try await libraries(.private)
-        let shared = (try? await libraries(.shared)) ?? []
+        let privates = try await libraries(.private, refresh: true)
+        let shared = (try? await libraries(.shared, refresh: true)) ?? []
         return privates + shared
     }
 
@@ -260,30 +277,54 @@ public final class PhotoLibrary: @unchecked Sendable {
         if libraryType == .shared { return [] }
         var albums: [(String, [String: Any])] = []
         var visited = Set<String>()
-        var pending: [(String?, String)] = [(nil, "")]
-        while !pending.isEmpty {
-            let (parentID, prefix) = pending.removeFirst()
-            for record in try await queryFolders(parentID: parentID) {
-                guard let id = record["recordName"] as? String,
-                      let fields = record["fields"] as? [String: Any] else { continue }
-                if id == "----Root-Folder----" || id == "----Project-Root-Folder----" { continue }
-                if let deleted = (fields["isDeleted"] as? [String: Any])?["value"], PhotoAsset.number(deleted) == 1 { continue }
-                if (fields["isDeleted"] as? [String: Any])?["value"] as? Bool == true { continue }
-                guard let encoded = (fields["albumNameEnc"] as? [String: Any])?["value"] as? String,
-                      let data = Data(base64Encoded: encoded),
-                      let name = String(data: data, encoding: .utf8) else { continue }
-                let albumType = PhotoAsset.number((fields["albumType"] as? [String: Any])?["value"]).map(Int.init)
-                if albumType == PhotoLibrary.folderAlbumType {
-                    if !visited.contains(id) {
-                        visited.insert(id)
-                        pending.append((id, "\(prefix)\(name)/"))
+        // One level of folders at a time, a few folders at once; the albums keep their order.
+        var level: [(parentID: String?, prefix: String)] = [(nil, "")]
+        while !level.isEmpty {
+            var next: [(parentID: String?, prefix: String)] = []
+            for start in stride(from: 0, to: level.count, by: PhotoLibrary.folderRequests) {
+                let folders = Array(level[start..<min(start + PhotoLibrary.folderRequests, level.count)])
+                let listings = try await withThrowingTaskGroup(of: (Int, FolderListing).self) { group in
+                    for (index, folder) in folders.enumerated() {
+                        group.addTask { (index, FolderListing(records: try await self.queryFolders(parentID: folder.parentID))) }
                     }
-                } else {
-                    albums.append(("\(prefix)\(name)", record))
+                    var listings = [FolderListing](repeating: FolderListing(records: []), count: folders.count)
+                    for try await (index, listing) in group { listings[index] = listing }
+                    return listings
+                }
+                for (folder, listing) in zip(folders, listings) {
+                    let prefix = folder.prefix
+                    for record in listing.records {
+                        guard let id = record["recordName"] as? String,
+                              let fields = record["fields"] as? [String: Any] else { continue }
+                        if id == "----Root-Folder----" || id == "----Project-Root-Folder----" { continue }
+                        if let deleted = (fields["isDeleted"] as? [String: Any])?["value"], PhotoAsset.number(deleted) == 1 { continue }
+                        if (fields["isDeleted"] as? [String: Any])?["value"] as? Bool == true { continue }
+                        guard let encoded = (fields["albumNameEnc"] as? [String: Any])?["value"] as? String,
+                              let data = Data(base64Encoded: encoded),
+                              let name = String(data: data, encoding: .utf8) else { continue }
+                        let albumType = PhotoAsset.number((fields["albumType"] as? [String: Any])?["value"]).map(Int.init)
+                        if albumType == PhotoLibrary.folderAlbumType {
+                            if !visited.contains(id) {
+                                visited.insert(id)
+                                next.append((id, "\(prefix)\(name)/"))
+                            }
+                        } else {
+                            albums.append(("\(prefix)\(name)", record))
+                        }
+                    }
                 }
             }
+            level = next
         }
         return albums
+    }
+
+    /// Folders asked for at the same time while walking the album tree.
+    static let folderRequests = 4
+
+    /// The records of one folder, carried out of the task that fetched them.
+    private struct FolderListing: @unchecked Sendable {
+        let records: [[String: Any]]
     }
 
     // MARK: Changes
