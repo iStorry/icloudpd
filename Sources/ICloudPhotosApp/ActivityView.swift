@@ -3,243 +3,303 @@ import AppKit
 import ICloudKit
 import SwiftUI
 
-/// A run in progress or just finished: how far it is, what it saved, any problems, and the log
-/// for those who want it.
+/// A run in progress or just finished, told in plain sentences: where it is, what it did, what
+/// went wrong and what to do next. The log is there for those who ask for details.
 struct ActivityStage: View {
     @EnvironmentObject var model: AppModel
-    /// The log is folded away unless someone opens it; the choice is remembered.
+    /// The details are folded away unless someone opens them; the choice is remembered.
     @AppStorage("showsActivityLog") private var showsLog = false
 
     private var isDownload: Bool { model.runKind == .download }
-    /// A delete list has no numbers of its own: the log is all there is to show.
-    private var logIsOpen: Bool { showsLog || !isDownload }
+    private var dry: Bool { model.currentDryRun }
+    private var running: Bool { model.isDownloading }
+    /// A delete list has no numbers of its own: its details are all there is to show.
+    private var detailsOpen: Bool { showsLog || !isDownload }
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                hero
-                if isDownload {
-                    // Up to four share one row; more go in rows of three.
-                    let stats = tiles
-                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: stats.count <= 4 ? stats.count : 3),
-                              spacing: 10) {
-                        ForEach(stats) { StatTile(stat: $0) }
-                    }
+            VStack(alignment: .leading, spacing: 14) {
+                statusCard
+                if isDownload, !results.isEmpty {
+                    resultsCard
                 }
-                if isDownload, !model.currentDryRun, !model.recentSaves.isEmpty {
+                if isDownload, !dry, !model.recentSaves.isEmpty {
                     recentPhotos
                 }
-                if !problems.isEmpty {
-                    problemsCard
+                if !running, isDownload, model.failed > 0 {
+                    problemCard
                 }
-                logSection
+                details
             }
             .padding(.bottom, 4)
         }
         .scrollIndicators(.never)
     }
 
-    // MARK: Hero
+    // MARK: Status
 
-    private var hero: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            HStack(spacing: 26) {
-                ProgressRing(progress: model.runFraction ?? (model.isDownloading ? nil : 1), lineWidth: 10) {
-                    ringCenter
-                }
-                .frame(width: 132, height: 132)
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel("Progress")
-                .accessibilityValue(model.runFraction.map { "\(Int($0 * 100)) percent" } ?? "")
-
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(spacing: 6) {
-                        if model.currentDryRun {
-                            Chip(text: "Preview · nothing changes", color: Theme.warning)
-                        }
-                        if let album = model.currentAlbum {
-                            Chip(text: album, color: Theme.accentSoft)
-                        }
-                    }
+    private var statusCard: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            HStack(alignment: .center, spacing: 18) {
+                StatusBadge(kind: badge)
+                VStack(alignment: .leading, spacing: 6) {
                     Text(title)
-                        .font(.system(size: 26, weight: .bold))
-                        .tracking(-0.7)
+                        .font(.system(size: 28, weight: .bold))
+                        .tracking(-0.8)
                         .fixedSize(horizontal: false, vertical: true)
-                    TimelineView(.periodic(from: .now, by: 1)) { context in
-                        Text(detail(now: context.date))
-                            .font(.system(size: 14))
-                            .foregroundStyle(Theme.secondary)
-                            .monospacedDigit()
-                    }
-                    buttons.padding(.top, 4)
+                    Text(subtitle)
+                        .font(.system(size: 15))
+                        .foregroundStyle(Color(white: 0.75))
+                        .lineSpacing(2)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                Spacer(minLength: 0)
+                Spacer(minLength: 8)
             }
-            if isDownload, let total = model.total, total > 0 {
-                breakdownBar(total: total)
+
+            if running {
+                progress
             }
+
+            HStack(spacing: 10) { buttons }
+                .fixedSize()
         }
-        .padding(24)
+        .padding(26)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .panel(cornerRadius: 20, fill: Color.white.opacity(0.035), stroke: Color.white.opacity(0.07))
     }
 
-    @ViewBuilder private var ringCenter: some View {
-        if model.isDownloading, let fraction = model.runFraction {
-            HStack(alignment: .firstTextBaseline, spacing: 1) {
-                Text("\(Int((fraction * 100).rounded(.down)))")
-                    .font(.system(size: 36, weight: .semibold))
-                    .tracking(-1.2)
-                    .monospacedDigit()
-                    .contentTransition(.numericText())
-                Text("%").font(.system(size: 18, weight: .semibold)).foregroundStyle(Theme.secondary)
-            }
-        } else if model.isDownloading {
-            ProgressView().controlSize(.large)
-        } else {
-            Image(systemName: outcomeSymbol)
-                .font(.system(size: 36, weight: .medium))
-                .foregroundStyle(model.outcome == .failed ? Theme.dangerSoft : Color.primary)
+    private var badge: StatusBadge.Kind {
+        if running { return .working }
+        if dry && model.outcome == .finished { return .preview }
+        switch model.outcome {
+        case .finished: return model.failed > 0 && isDownload ? .problem : .done
+        case .stopped: return .stopped
+        case .failed: return .problem
         }
     }
 
     private var title: String {
-        let dry = model.currentDryRun
-        let deleteList = model.runKind == .deleteList
-        if model.isDownloading {
-            if deleteList { return dry ? "Checking the delete list" : "Deleting listed photos" }
-            return dry ? "Checking your library" : "Saving your photos"
+        if !isDownload {
+            if running { return dry ? "Checking the delete list" : "Deleting the listed photos" }
+            switch model.outcome {
+            case .finished: return dry ? "Delete list checked" : "Delete list finished"
+            case .stopped: return "Stopped"
+            case .failed: return "Couldn't finish"
+            }
         }
+        if running { return dry ? "Previewing your sync" : "Saving your photos" }
         switch model.outcome {
+        case .finished:
+            if dry { return "Preview finished" }
+            if model.failed > 0 { return "Mostly done" }
+            return model.downloaded == 0 && model.deletedFromICloud == 0 ? "Everything was already saved" : "All done!"
         case .stopped: return "Stopped"
         case .failed: return "Couldn't finish"
+        }
+    }
+
+    private var subtitle: String {
+        if running {
+            if dry { return "Nothing will be saved or removed. This only shows what Sync Now would do." }
+            return "You can keep using your Mac while this runs."
+        }
+        switch model.outcome {
         case .finished:
-            if deleteList { return dry ? "Delete list checked" : "Delete list finished" }
-            if dry { return model.downloaded == 0 ? "Nothing new to download" : "\(model.downloaded.formatted()) would be downloaded" }
-            return model.downloaded == 0 ? "Already up to date" : "\(model.downloaded.formatted()) new photos saved"
-        }
-    }
-
-    /// "501 of 1,106 checked · about 3 min left", or how long the run took.
-    private func detail(now: Date) -> String {
-        var parts: [String] = []
-        if isDownload {
-            parts.append("\(model.processed.formatted())\(model.total.map { " of \($0.formatted())" } ?? "") checked")
-        }
-        if model.isDownloading {
-            if let left = timeLeft(now: now) {
-                parts.append(left)
-            } else if let start = model.runStartedAt {
-                parts.append(Self.duration(now.timeIntervalSince(start)) + " so far")
+            if dry { return "Nothing was changed. Here is what Sync Now would do." }
+            var text = model.failed > 0 ? "Everything else is safe on this Mac." : "Your photos are safe on this Mac."
+            if let end = model.runEndedAt {
+                text += " Finished at \(end.formatted(date: .omitted, time: .shortened))"
+                if let start = model.runStartedAt { text += ", in \(Self.spoken(end.timeIntervalSince(start)))" }
+                text += "."
             }
-        } else if let start = model.runStartedAt, let end = model.runEndedAt {
-            parts.append("took " + Self.duration(end.timeIntervalSince(start)))
+            return text
+        case .stopped:
+            return "Nothing is lost. Press Carry On, or Sync Now later, and it picks up where it left off."
+        case .failed:
+            return Self.plainReason(for: model.log.last(where: \.isError)?.text, otherwise: "Something went wrong talking to iCloud.")
+                + " Nothing is lost, and you can try again."
         }
-        return parts.joined(separator: " · ")
     }
 
-    private func timeLeft(now: Date) -> String? {
-        guard let total = model.total, let start = model.albumStartedAt else { return nil }
+    private var progress: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .firstTextBaseline) {
+                    if let fraction = model.runFraction {
+                        Text("\(Int((fraction * 100).rounded(.down)))%")
+                            .font(.system(size: 22, weight: .semibold))
+                            .monospacedDigit()
+                            .contentTransition(.numericText())
+                    }
+                    Spacer()
+                    Text(timeLeft(now: context.date))
+                        .font(.system(size: 14))
+                        .foregroundStyle(Theme.secondary)
+                }
+                GeometryReader { geo in
+                    Capsule().fill(Color.white.opacity(0.08))
+                        .overlay(alignment: .leading) {
+                            Capsule()
+                                .fill(LinearGradient(colors: [Color(red: 0.04, green: 0.34, blue: 0.84), Color(red: 0.24, green: 0.55, blue: 1)],
+                                                     startPoint: .leading, endPoint: .trailing))
+                                .frame(width: max(14, geo.size.width * CGFloat(model.runFraction ?? 0.02)))
+                                .animation(.smooth(duration: 0.4), value: model.processed)
+                        }
+                }
+                .frame(height: 14)
+                .accessibilityElement()
+                .accessibilityLabel("Progress")
+                .accessibilityValue(model.runFraction.map { "\(Int($0 * 100)) percent" } ?? "Starting")
+                Text(lookedAt)
+                    .font(.system(size: 13))
+                    .foregroundStyle(Theme.secondary)
+                    .monospacedDigit()
+            }
+        }
+    }
+
+    private var lookedAt: String {
+        guard isDownload else { return "\(model.log.count.formatted()) lines so far" }
+        guard let total = model.total else { return "Getting the list of your photos from iCloud…" }
+        return "Looked at \(model.processed.formatted()) of \(total.formatted()) photos"
+            + (model.currentAlbum.map { $0 == "All Photos" ? "" : " in \u{201C}\($0)\u{201D}" } ?? "")
+    }
+
+    private func timeLeft(now: Date) -> String {
+        guard let total = model.total, let start = model.albumStartedAt else { return "Starting…" }
         let elapsed = now.timeIntervalSince(start)
-        guard elapsed > 5, model.processed > 10, model.processed < total else { return nil }
+        guard elapsed > 5, model.processed > 10, model.processed < total else { return "Working…" }
         let left = elapsed / Double(model.processed) * Double(total - model.processed)
-        return left < 60 ? "less than a minute left" : "about \(Self.duration(left)) left"
+        return left < 60 ? "Less than a minute left" : "About \(Self.spoken(left)) left"
     }
 
-    static func duration(_ seconds: TimeInterval) -> String {
+    /// "2 minutes", "1 hour 5 minutes", "40 seconds".
+    static func spoken(_ seconds: TimeInterval) -> String {
         let formatter = DateComponentsFormatter()
-        formatter.unitsStyle = .abbreviated
+        formatter.unitsStyle = .full
         formatter.allowedUnits = seconds >= 3_600 ? [.hour, .minute] : seconds >= 60 ? [.minute] : [.second]
         formatter.maximumUnitCount = 2
         return formatter.string(from: max(seconds, 1)) ?? ""
     }
 
-    private var outcomeSymbol: String {
-        switch model.outcome {
-        case .finished: return "checkmark"
-        case .stopped: return "stop.fill"
-        case .failed: return "exclamationmark.triangle"
-        }
-    }
-
     @ViewBuilder private var buttons: some View {
-        HStack(spacing: 10) {
-            if model.isDownloading {
-                Button { model.stopDownload() } label: { Label("Stop", systemImage: "stop.fill") }
-                    .buttonStyle(HeroButtonStyle(isPrimary: false, height: 42))
-            } else {
-                Button { model.page = .library } label: { Text("Done").frame(minWidth: 50) }
-                    .buttonStyle(HeroButtonStyle(height: 42))
-                    .keyboardShortcut(.defaultAction)
-                if model.currentDryRun, isDownload {
-                    Button { model.startDownload() } label: { Label("Run It for Real", systemImage: "arrow.down.to.line") }
-                        .buttonStyle(HeroButtonStyle(isPrimary: false, height: 42))
-                        .disabled(model.phase != .signedIn || model.directory == nil)
-                } else if model.directory != nil {
-                    Button { model.openDirectory() } label: { Label("Show in Finder", systemImage: "folder") }
-                        .buttonStyle(HeroButtonStyle(isPrimary: false, height: 42))
-                }
+        if running {
+            Button { model.stopDownload() } label: { Label("Stop", systemImage: "stop.fill") }
+                .buttonStyle(HeroButtonStyle(isPrimary: false, height: 44))
+        } else if dry && model.outcome == .finished && isDownload {
+            Button(action: runForReal) { Label("Do It Now", systemImage: "arrow.down.to.line") }
+                .buttonStyle(HeroButtonStyle(height: 44))
+                .keyboardShortcut(.defaultAction)
+                .disabled(!canRun)
+            Button { model.page = .library } label: { Text("Not Now") }
+                .buttonStyle(HeroButtonStyle(isPrimary: false, height: 44))
+        } else if model.outcome != .finished && isDownload {
+            Button(action: runForReal) {
+                Label(model.outcome == .stopped ? "Carry On" : "Try Again", systemImage: "arrow.clockwise")
+            }
+            .buttonStyle(HeroButtonStyle(height: 44))
+            .keyboardShortcut(.defaultAction)
+            .disabled(!canRun)
+            Button { model.page = .library } label: { Text("Done") }
+                .buttonStyle(HeroButtonStyle(isPrimary: false, height: 44))
+        } else {
+            Button { model.page = .library } label: { Text("Done").frame(minWidth: 50) }
+                .buttonStyle(HeroButtonStyle(height: 44))
+                .keyboardShortcut(.defaultAction)
+            if model.directory != nil, isDownload {
+                Button { model.openDirectory() } label: { Label("Open Folder", systemImage: "folder") }
+                    .buttonStyle(HeroButtonStyle(isPrimary: false, height: 44))
             }
         }
-        .fixedSize()
     }
 
-    /// Everything checked so far, split by what happened to it, against what is still to check.
-    private func breakdownBar(total: Int) -> some View {
-        GeometryReader { geo in
-            let width = geo.size.width
-            let share = { (count: Int) in width * CGFloat(count) / CGFloat(max(total, 1)) }
-            HStack(spacing: 2) {
-                Rectangle().fill(Theme.accent).frame(width: share(model.downloaded))
-                Rectangle().fill(Color.white.opacity(0.32)).frame(width: share(model.skipped))
-                Rectangle().fill(Theme.danger).frame(width: share(model.failed))
-                Spacer(minLength: 0)
-            }
-            .animation(.smooth(duration: 0.4), value: model.processed)
+    private var canRun: Bool { model.phase == .signedIn && model.directory != nil }
+
+    /// Runs the plan for real. The person has just seen what it does, so it doesn't ask again.
+    private func runForReal() {
+        model.startDownload(confirmed: model.config.deletesFromICloud)
+    }
+
+    // MARK: Results
+
+    private struct Result: Identifiable {
+        let symbol: String
+        let tint: Color
+        let text: String
+        var id: String { text }
+    }
+
+    private var results: [Result] {
+        var list: [Result] = []
+        let size = model.bytes > 0 && !dry ? " (\(AppSidebar.size(Int64(model.bytes))))" : ""
+        if model.downloaded > 0 {
+            list.append(Result(symbol: "arrow.down.circle.fill", tint: Theme.accentSoft,
+                               text: dry ? "\(Self.photos(model.downloaded)) would be saved to this Mac"
+                                         : "\(Self.photos(model.downloaded, new: true)) saved to this Mac\(size)"))
+        } else if !running {
+            list.append(Result(symbol: "checkmark.circle.fill", tint: Theme.accentSoft,
+                               text: dry ? "No new photos would be saved" : "No new photos to save"))
         }
-        .frame(height: 6)
-        .background(Color.white.opacity(0.08))
-        .clipShape(.capsule)
-        .accessibilityHidden(true)
-    }
-
-    // MARK: Numbers
-
-    private var tiles: [Stat] {
-        let dry = model.currentDryRun
-        var list = [
-            Stat(title: dry ? "To download" : "New", value: model.downloaded,
-                 caption: dry ? "Preview only" : AppSidebar.size(Int64(model.bytes)), color: Theme.accent),
-            Stat(title: "Already saved", value: model.skipped, caption: "Skipped", color: Color.white.opacity(0.32)),
-        ]
-        if model.deletedFromICloud > 0 || model.config.deletesFromICloud {
-            list.append(Stat(title: dry ? "Would leave iCloud" : "Left iCloud", value: model.deletedFromICloud,
-                             caption: "In Recently Deleted", color: Theme.warning))
+        if model.skipped > 0 {
+            list.append(Result(symbol: "checkmark.circle.fill", tint: Color(white: 0.6),
+                               text: "\(Self.photos(model.skipped)) \(model.skipped == 1 ? "was" : "were") already on this Mac"))
+        }
+        if model.deletedFromICloud > 0 {
+            list.append(Result(symbol: "icloud.slash.fill", tint: Theme.warning,
+                               text: dry ? "\(Self.photos(model.deletedFromICloud)) would be removed from iCloud"
+                                         : "\(Self.photos(model.deletedFromICloud)) removed from iCloud. You can get them back from Recently Deleted for 30 days."))
         }
         if model.deletedLocally > 0 {
-            list.append(Stat(title: dry ? "Would remove here" : "Removed here", value: model.deletedLocally,
-                             caption: "Deleted in iCloud", color: Color(white: 0.6)))
+            list.append(Result(symbol: "trash.circle.fill", tint: Color(white: 0.6),
+                               text: "\(Self.photos(model.deletedLocally)) \(dry ? "would be" : "were") deleted here, because you deleted them in iCloud"))
         }
         if model.pruned > 0 {
-            list.append(Stat(title: dry ? "Would set aside" : "Set aside", value: model.pruned,
-                             caption: "Gone from iCloud", color: Color(white: 0.6)))
+            list.append(Result(symbol: "archivebox.circle.fill", tint: Color(white: 0.6),
+                               text: "\(Self.photos(model.pruned)) \(dry ? "would be" : "were") put aside, because they're no longer in iCloud"))
         }
-        if model.failed > 0 {
-            list.append(Stat(title: "Failed", value: model.failed, caption: "See problems below", color: Theme.danger, isBad: true))
+        if running, model.failed > 0 {
+            list.append(Result(symbol: "exclamationmark.circle.fill", tint: Theme.dangerSoft,
+                               text: "\(Self.photos(model.failed)) couldn't be saved so far"))
         }
         return list
+    }
+
+    /// "1 photo", "337 photos", "337 new photos".
+    static func photos(_ count: Int, new: Bool = false) -> String {
+        "\(count.formatted()) \(new ? "new " : "")\(count == 1 ? "photo" : "photos")"
+    }
+
+    private var resultsCard: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(results.enumerated()), id: \.element.id) { index, result in
+                if index > 0 { CardDivider() }
+                HStack(alignment: .firstTextBaseline, spacing: 14) {
+                    Image(systemName: result.symbol)
+                        .font(.system(size: 18))
+                        .foregroundStyle(result.tint)
+                        .frame(width: 22)
+                    Text(result.text)
+                        .font(.system(size: 15))
+                        .lineSpacing(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .contentTransition(.numericText())
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 15)
+            }
+        }
+        .panel(cornerRadius: 18, fill: Color.white.opacity(0.035), stroke: Color.white.opacity(0.07))
+        .accessibilityElement(children: .combine)
     }
 
     // MARK: Photos
 
     private var recentPhotos: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                SectionHeader(title: model.isDownloading ? "Just saved" : "Saved this run")
-                Spacer()
-                if model.directory != nil {
-                    CardLink(title: "Show in Finder") { model.openDirectory() }
-                }
-            }
+            Text(running ? "Just saved" : "Saved this time")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Theme.secondary)
             GeometryReader { geo in
                 let size: CGFloat = 84
                 let count = max(1, Int((geo.size.width + 8) / (size + 8)))
@@ -252,70 +312,85 @@ struct ActivityStage: View {
             }
             .frame(height: 84)
         }
-        .padding(16)
+        .padding(18)
         .panel(cornerRadius: 18, fill: Color.white.opacity(0.035), stroke: Color.white.opacity(0.07))
     }
 
     // MARK: Problems
 
-    private var problems: [AppModel.LogLine] { model.log.filter(\.isError) }
-
-    private var problemsCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                SectionHeader(title: problems.count == 1 ? "1 problem" : "\(problems.count.formatted()) problems")
-                Spacer()
-                if problems.count > 4 {
-                    CardLink(title: "See all in the log") { showsLog = true }
+    private var problemCard: some View {
+        HStack(alignment: .top, spacing: 16) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 20))
+                .foregroundStyle(Theme.warning)
+                .frame(width: 44, height: 44)
+                .background(Theme.warning.opacity(0.14), in: .circle)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("\(Self.photos(model.failed)) couldn't be saved")
+                    .font(.system(size: 17, weight: .semibold))
+                Text(Self.plainReason(for: model.log.last(where: \.isError)?.text)
+                     + " \(model.failed == 1 ? "It stays" : "They stay") in iCloud and will be tried again the next time you sync.")
+                    .font(.system(size: 14))
+                    .foregroundStyle(Color(white: 0.78))
+                    .lineSpacing(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 14) {
+                    Button { runForReal() } label: { Label("Try Again", systemImage: "arrow.clockwise") }
+                        .buttonStyle(PillButtonStyle(kind: .secondary, height: 32))
+                        .disabled(!canRun)
+                    Button("Which ones?") { withAnimation(.smooth(duration: 0.2)) { showsLog = true } }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Theme.accentSoft)
                 }
+                .font(.system(size: 13, weight: .medium))
+                .padding(.top, 4)
             }
-            Card {
-                ForEach(problems.suffix(4)) { line in
-                    HStack(alignment: .firstTextBaseline, spacing: 10) {
-                        Image(systemName: "exclamationmark.circle.fill").foregroundStyle(Theme.dangerSoft)
-                        Text(line.text)
-                            .foregroundStyle(Theme.dangerSoft)
-                            .lineLimit(2)
-                            .truncationMode(.middle)
-                            .textSelection(.enabled)
-                        Spacer(minLength: 0)
-                    }
-                    .font(.system(size: 13))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
-                }
-            }
+            Spacer(minLength: 0)
         }
+        .padding(20)
+        .panel(cornerRadius: 18, fill: Theme.warning.opacity(0.06), stroke: Theme.warning.opacity(0.28))
     }
 
-    // MARK: Log
+    /// A guess at why, in words anyone understands, from the last error message.
+    static func plainReason(for error: String?, otherwise: String = "iCloud didn't send them this time.") -> String {
+        let text = (error ?? "").lowercased()
+        if ["network", "internet", "offline", "timed out", "connection"].contains(where: text.contains) {
+            return "Your internet connection seems to have dropped."
+        }
+        if ["space", "disk full", "no room"].contains(where: text.contains) {
+            return "This Mac, or the drive the folder is on, may be full."
+        }
+        if ["permission", "not permitted", "read-only"].contains(where: text.contains) {
+            return "The folder couldn't be written to."
+        }
+        if ["sign in", "session", "401", "421"].contains(where: text.contains) {
+            return "iCloud asked you to sign in again."
+        }
+        return otherwise
+    }
 
-    private var logSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Button { withAnimation(.smooth(duration: 0.2)) { showsLog.toggle() } } label: {
-                HStack(spacing: 10) {
-                    Image(systemName: "list.bullet.rectangle")
-                        .foregroundStyle(Theme.secondary)
-                    Text("Activity log").font(.system(size: 13, weight: .medium))
-                    Text("\(model.log.count.formatted()) lines")
-                        .font(.system(size: 12))
-                        .foregroundStyle(Theme.secondary)
-                    Spacer()
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(Theme.secondary)
-                        .rotationEffect(.degrees(logIsOpen ? 0 : -90))
+    // MARK: Details
+
+    private var details: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if isDownload {
+                Button { withAnimation(.smooth(duration: 0.2)) { showsLog.toggle() } } label: {
+                    HStack(spacing: 6) {
+                        Text(showsLog ? "Hide details" : "Show details")
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 10, weight: .semibold))
+                            .rotationEffect(.degrees(showsLog ? 0 : -90))
+                    }
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Theme.secondary)
+                    .padding(.horizontal, 4)
+                    .frame(height: 28)
+                    .contentShape(.rect)
                 }
-                .padding(.horizontal, 16)
-                .frame(height: 44)
-                .contentShape(.rect)
+                .buttonStyle(.plain)
+                .accessibilityValue(showsLog ? "Shown" : "Hidden")
             }
-            .buttonStyle(.plain)
-            .disabled(!isDownload)
-            .panel(cornerRadius: 14, fill: Color.white.opacity(0.02), stroke: Color.white.opacity(0.07))
-            .accessibilityValue(logIsOpen ? "Shown" : "Hidden")
-
-            if logIsOpen {
+            if detailsOpen {
                 ActivityList(lines: model.log)
                     .frame(height: isDownload ? 280 : 420)
                     .transition(.opacity)
@@ -326,56 +401,42 @@ struct ActivityStage: View {
 
 // MARK: Pieces
 
-struct Stat: Identifiable {
-    let title: String
-    let value: Int
-    let caption: String
-    var color: Color = Theme.accent
-    var isBad = false
-    var id: String { title }
-}
-
-/// One number of a run, with the colour it has in the bar above.
-struct StatTile: View {
-    let stat: Stat
+/// The big round symbol beside the status: working, done, preview, stopped or a problem.
+struct StatusBadge: View {
+    enum Kind { case working, done, preview, stopped, problem }
+    let kind: Kind
+    @State private var bob = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 6) {
-                RoundedRectangle(cornerRadius: 2).fill(stat.color).frame(width: 8, height: 8)
-                Text(stat.title).font(.system(size: 12)).foregroundStyle(stat.isBad ? Theme.dangerSoft : Theme.secondary)
-            }
-            Text(stat.value.formatted())
-                .font(.system(size: 24, weight: .semibold))
-                .tracking(-0.5)
-                .monospacedDigit()
-                .contentTransition(.numericText())
-            Text(stat.caption).font(.system(size: 12)).foregroundStyle(stat.isBad ? Theme.dangerSoft : Theme.secondary)
-        }
-        .lineLimit(1)
-        .padding(.horizontal, 16)
-        .padding(.vertical, 14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .panel(cornerRadius: 16,
-               fill: stat.isBad ? Theme.danger.opacity(0.14) : Color.white.opacity(0.035),
-               stroke: stat.isBad ? Theme.dangerSoft.opacity(0.3) : Color.white.opacity(0.07))
-        .accessibilityElement(children: .combine)
-    }
-}
-
-/// A small coloured label in the activity header.
-struct Chip: View {
-    let text: String
-    let color: Color
-
-    var body: some View {
-        Text(text)
-            .font(.system(size: 12, weight: .medium))
+        Image(systemName: symbol)
+            .font(.system(size: 26, weight: .semibold))
             .foregroundStyle(color)
-            .lineLimit(1)
-            .padding(.horizontal, 10)
-            .frame(height: 24)
-            .background(color.opacity(0.16), in: .capsule)
+            .offset(y: kind == .working && bob ? 3 : 0)
+            .frame(width: 64, height: 64)
+            .background(color.opacity(0.16), in: .circle)
+            .overlay(Circle().strokeBorder(color.opacity(0.3)))
+            .animation(kind == .working ? .easeInOut(duration: 0.8).repeatForever(autoreverses: true) : .default, value: bob)
+            .onAppear { bob = true }
+            .accessibilityHidden(true)
+    }
+
+    private var symbol: String {
+        switch kind {
+        case .working: return "arrow.down"
+        case .done: return "checkmark"
+        case .preview: return "eye"
+        case .stopped: return "pause.fill"
+        case .problem: return "exclamationmark"
+        }
+    }
+
+    private var color: Color {
+        switch kind {
+        case .working, .preview: return Theme.accentSoft
+        case .done: return Color(red: 0.5, green: 0.89, blue: 0.66)
+        case .stopped: return Color(white: 0.85)
+        case .problem: return Theme.warning
+        }
     }
 }
 
@@ -390,17 +451,18 @@ struct SavedThumbnail: View {
     }
 
     var body: some View {
-        ZStack {
-            Color.white.opacity(0.06)
-            if let image {
-                Image(nsImage: image).resizable().scaledToFill()
-            } else {
-                Image(systemName: ["mov", "mp4", "m4v"].contains(url.pathExtension.lowercased()) ? "video.fill" : "photo")
-                    .font(.system(size: 18))
-                    .foregroundStyle(Theme.secondary)
+        // The photo is an overlay, so it takes the tile's size and is cut to it, however wide it is.
+        Color.white.opacity(0.06)
+            .overlay {
+                if let image {
+                    Image(nsImage: image).resizable().scaledToFill()
+                } else {
+                    Image(systemName: ["mov", "mp4", "m4v"].contains(url.pathExtension.lowercased()) ? "video.fill" : "photo")
+                        .font(.system(size: 18))
+                        .foregroundStyle(Theme.secondary)
+                }
             }
-        }
-        .clipShape(.rect(cornerRadius: 12, style: .continuous))
+            .clipShape(.rect(cornerRadius: 12, style: .continuous))
         .help(url.lastPathComponent)
         .accessibilityLabel(url.lastPathComponent)
         .task(id: path) {
