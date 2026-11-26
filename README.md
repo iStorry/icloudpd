@@ -80,8 +80,8 @@ It's a Swift reimplementation of the open-source [icloudpd](https://github.com/i
 ## Download
 
 Each release on the Releases page has the app as **iCloud-Photos-Downloader-*version*.zip**: open it
-and drag the app to Applications. The app isn't notarized yet, so the first time macOS stops it; go to
-**System Settings › Privacy & Security** and click **Open Anyway**.
+and drag the app to Applications. A release's notes say whether it's notarized. If it isn't, macOS stops
+the app the first time; go to **System Settings › Privacy & Security** and click **Open Anyway**.
 
 ## Build and run
 
@@ -100,7 +100,40 @@ Run **Actions › Release › Run workflow** and type a version such as `1.2.0`.
 build pass, the commit is tagged `v1.2.0` and a GitHub Release is published with the zipped app, the
 command-line tool, SHA-256 checksums and notes from the commits since the last release. Pushing a tag
 yourself (`git tag v1.2.0 && git push origin v1.2.0`) does the same. A version with a suffix, such as
-`1.2.0-beta.1`, becomes a pre-release.
+`1.2.0-beta.1`, becomes a pre-release. With the signing secrets below, the app and the command-line
+tool are signed with Developer ID and notarized before they're zipped.
+
+## Notarizing
+
+Notarizing lets the app open on any Mac without a warning. It needs a paid Apple Developer Program
+membership. Set it up once:
+
+1. **Certificate.** In Xcode › Settings › Accounts › Manage Certificates, add a **Developer ID
+   Application** certificate (only the team's Account Holder can). In Keychain Access, export it with its
+   private key as a .p12 and give it a password.
+2. **API key.** In App Store Connect › Users and Access › Integrations › App Store Connect API, create a
+   team key with the Developer role. Download the `AuthKey_XXXX.p8` (you only get one chance) and note
+   the Key ID and the Issuer ID shown above the keys.
+3. **Secrets.** Add the five to the repository from a terminal (each command asks for or reads its value):
+
+   ```sh
+   base64 -i DeveloperID.p12 | gh secret set DEVELOPER_ID_P12
+   gh secret set DEVELOPER_ID_P12_PASSWORD
+   gh secret set NOTARY_API_KEY < AuthKey_XXXX.p8
+   gh secret set NOTARY_KEY_ID
+   gh secret set NOTARY_ISSUER_ID
+   ```
+
+The next release is then notarized. To do it on your Mac instead:
+
+```sh
+xcrun notarytool store-credentials icloudphotos   # once; asks for the API key or an Apple ID
+SIGN_IDENTITY="Developer ID Application" ./scripts/build-app.sh
+NOTARY_PROFILE=icloudphotos ./scripts/notarize.sh
+```
+
+The first notarized version is signed differently from earlier ones, so macOS may ask once to let it
+use the password it saved in the Keychain.
 
 ## Command-line tool
 
