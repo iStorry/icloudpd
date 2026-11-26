@@ -7,8 +7,11 @@ public enum ICloudDomain: String, Codable, CaseIterable, Sendable {
     case com
     case cn
 
-    var authRoot: String { self == .cn ? "https://idmsa.apple.com.cn" : "https://idmsa.apple.com" }
-    var authEndpoint: String { authRoot + "/appleauth/auth" }
+    /// The sign-in hosts to try, in order. www.icloud.com.cn itself signs in through idmsa.apple.com,
+    /// so China accounts fall back to it when idmsa.apple.com.cn answers 503 (#51).
+    var authRoots: [String] {
+        self == .cn ? ["https://idmsa.apple.com.cn", "https://idmsa.apple.com"] : ["https://idmsa.apple.com"]
+    }
     var home: String { self == .cn ? "https://www.icloud.com.cn" : "https://www.icloud.com" }
     var setup: String { self == .cn ? "https://setup.icloud.com.cn/setup/ws/1" : "https://setup.icloud.com/setup/ws/1" }
 }
@@ -49,12 +52,18 @@ public final class ICloudAccount: @unchecked Sendable {
     /// The accountLogin / validate answer: dsInfo, webservices, trust flags.
     private(set) var accountData: [String: Any] = [:]
 
+    /// The sign-in host in use: the domain's first, or the one sign-in fell back to.
+    /// The two-factor calls after it go to the same host.
+    private(set) var authRoot: String
+    var authEndpoint: String { authRoot + "/appleauth/auth" }
+
     // Apple's web sign-in widget key, the same constant icloudpd and icloud.com use.
     static let widgetKey = "d39ba9916b7251055b22c7f910e2ea796ee65e98b2ddecea8f5dde8d9d1a815d"
 
     public init(appleID: String, domain: ICloudDomain = .com, store: SessionStore? = nil) {
         self.appleID = appleID
         self.domain = domain
+        self.authRoot = domain.authRoots[0]
         self.http = HTTPClient(homeEndpoint: domain.home,
                                store: store ?? SessionStore(directory: SessionStore.defaultDirectory(for: appleID)))
     }
@@ -139,9 +148,25 @@ public final class ICloudAccount: @unchecked Sendable {
         (try? JSONSerialization.data(withJSONObject: object)) ?? Data()
     }
 
+    /// Signs in on the domain's sign-in host, moving on to the next one when a host answers 503.
     private func authenticateSRP(password: String) async throws {
+        var roots = domain.authRoots
+        while true {
+            authRoot = roots.removeFirst()
+            do {
+                try await authenticateSRPOnce(password: password)
+                return
+            } catch ICloudError.http(let status, _) where status == 503 && !roots.isEmpty {
+                continue
+            }
+        }
+    }
+
+    static let signInUnavailable = "Apple's sign-in service isn't available right now. Wait a while and try again."
+
+    private func authenticateSRPOnce(password: String) async throws {
         let client = SRPClient(accountName: appleID)
-        let headers = authHeaders(["Origin": domain.authRoot, "Referer": domain.authRoot + "/"])
+        let headers = authHeaders(["Origin": authRoot, "Referer": authRoot + "/"])
 
         // Step 1: send A, get back salt, B, c, iteration count and protocol.
         let initBody: [String: Any] = [
@@ -149,9 +174,10 @@ public final class ICloudAccount: @unchecked Sendable {
             "accountName": appleID,
             "protocols": ["s2k", "s2k_fo"],
         ]
-        let initResponse = try await http.send("POST", url(domain.authEndpoint + "/signin/init"),
+        let initResponse = try await http.send("POST", url(authEndpoint + "/signin/init"),
                                                headers: headers, body: jsonBody(initBody), checkErrors: false)
         if initResponse.status == 401 { throw ICloudError.invalidCredentials }
+        if initResponse.status >= 500 { throw ICloudError.http(status: initResponse.status, message: ICloudAccount.signInUnavailable) }
         guard initResponse.isOK else {
             throw ICloudError.http(status: initResponse.status, message: "Couldn't start the sign-in.")
         }
@@ -176,16 +202,19 @@ public final class ICloudAccount: @unchecked Sendable {
         ]
         if let trust = http.sessionData.trustToken { completeBody["trustTokens"] = [trust] }
 
-        let complete = try await http.send("POST", url(domain.authEndpoint + "/signin/complete?isRememberMeEnabled=true"),
+        let complete = try await http.send("POST", url(authEndpoint + "/signin/complete?isRememberMeEnabled=true"),
                                            headers: headers, body: jsonBody(completeBody), checkErrors: false)
         switch complete.status {
         case 409:
             break // two-factor code needed; accountLogin below tells us
         case 412:
             // Accounts without 2FA get "precondition failed" and must finish with repair/complete.
-            try await http.send("POST", url(domain.authEndpoint + "/repair/complete"),
+            try await http.send("POST", url(authEndpoint + "/repair/complete"),
                                 headers: authHeaders(), body: jsonBody([String: Any]()), checkErrors: false)
-        case 400..<600:
+        case 500..<600:
+            // Apple's side, not the password (#51).
+            throw ICloudError.http(status: complete.status, message: ICloudAccount.signInUnavailable)
+        case 400..<500:
             throw ICloudError.invalidCredentials
         default:
             break
@@ -232,7 +261,7 @@ public final class ICloudAccount: @unchecked Sendable {
     @discardableResult
     public func requestCodeOnTrustedDevices() async -> Bool {
         do {
-            let response = try await http.send("PUT", url(domain.authEndpoint + "/verify/trusteddevice/securitycode"),
+            let response = try await http.send("PUT", url(authEndpoint + "/verify/trusteddevice/securitycode"),
                                                headers: authHeaders(["Accept": "application/json"]), checkErrors: false)
             return response.isOK
         } catch {
@@ -244,7 +273,7 @@ public final class ICloudAccount: @unchecked Sendable {
     /// launches skip the code (until Apple expires the trust, usually after a couple of months).
     public func verify(code: String) async throws {
         let body = ["securityCode": ["code": code]]
-        let response = try await http.send("POST", url(domain.authEndpoint + "/verify/trusteddevice/securitycode"),
+        let response = try await http.send("POST", url(authEndpoint + "/verify/trusteddevice/securitycode"),
                                            headers: authHeaders(["Accept": "application/json"]),
                                            body: jsonBody(body), checkErrors: false)
         guard response.isOK else { throw ICloudError.wrongVerificationCode }
@@ -255,7 +284,7 @@ public final class ICloudAccount: @unchecked Sendable {
     /// The phone numbers Apple can text a code to. An empty list together with no
     /// trusted devices means the account uses security keys.
     public func trustedPhoneNumbers() async throws -> [TrustedPhoneNumber] {
-        let response = try await http.send("GET", url(domain.authEndpoint),
+        let response = try await http.send("GET", url(authEndpoint),
                                            headers: oauthHeaders(), checkErrors: false)
         guard response.status == 200 || response.status == 204 else { return [] }
         return TrustedPhoneParser.parse(html: response.text)
@@ -263,7 +292,7 @@ public final class ICloudAccount: @unchecked Sendable {
 
     public func sendSMSCode(to phone: TrustedPhoneNumber) async throws {
         let body: [String: Any] = ["phoneNumber": ["id": phone.id], "mode": "sms"]
-        let response = try await http.send("PUT", url(domain.authEndpoint + "/verify/phone"),
+        let response = try await http.send("PUT", url(authEndpoint + "/verify/phone"),
                                            headers: oauthHeaders(["Content-Type": "application/json; charset=utf-8"]),
                                            body: jsonBody(body), checkErrors: false)
         guard response.isOK else {
@@ -273,7 +302,7 @@ public final class ICloudAccount: @unchecked Sendable {
 
     public func verifySMS(code: String, phone: TrustedPhoneNumber) async throws {
         let body: [String: Any] = ["phoneNumber": ["id": phone.id], "securityCode": ["code": code], "mode": "sms"]
-        let response = try await http.send("POST", url(domain.authEndpoint + "/verify/phone/securitycode"),
+        let response = try await http.send("POST", url(authEndpoint + "/verify/phone/securitycode"),
                                            headers: oauthHeaders(["Content-Type": "application/json; charset=utf-8",
                                                                   "Accept": "application/json; charset=utf-8"]),
                                            body: jsonBody(body), checkErrors: false)
@@ -298,14 +327,14 @@ public final class ICloudAccount: @unchecked Sendable {
     }
 
     private func trustSession() async throws {
-        _ = try await http.send("GET", url(domain.authEndpoint + "/2sv/trust"), headers: authHeaders(), checkErrors: false)
+        _ = try await http.send("GET", url(authEndpoint + "/2sv/trust"), headers: authHeaders(), checkErrors: false)
         try await authenticateWithToken()
     }
 
     /// True when the account signs in with security keys instead of codes (Apple then lists
     /// no trusted phone numbers and sends an fsaChallenge).
     public func usesSecurityKeys() async -> Bool {
-        guard let response = try? await http.send("GET", url(domain.authEndpoint),
+        guard let response = try? await http.send("GET", url(authEndpoint),
                                                   headers: authHeaders(["Accept": "application/json"]), checkErrors: false),
               let data = try? response.json(),
               let challenge = data["fsaChallenge"] as? [String: Any] else { return false }
