@@ -48,7 +48,7 @@ struct LibraryGlance: @unchecked Sendable {
                              photos: photos)
     }
 
-    private static func thumbnail(of url: URL) -> NSImage? {
+    static func thumbnail(of url: URL) -> NSImage? {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
@@ -101,7 +101,7 @@ struct AppSidebar: View {
                 Image(systemName: symbol).frame(width: 20)
                 Text(title)
                 Spacer(minLength: 0)
-                if busy { ProgressView().controlSize(.mini) }
+                if busy { RunBadge(fraction: model.runFraction) }
             }
             .font(.system(size: 13, weight: isOn ? .medium : .regular))
             .foregroundStyle(isOn ? Color.primary : Color(white: 0.66))

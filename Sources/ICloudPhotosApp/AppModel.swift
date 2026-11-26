@@ -118,7 +118,16 @@ final class AppModel: ObservableObject {
 
     // MARK: Run state
 
-    @Published var isDownloading = false
+    @Published var isDownloading = false {
+        didSet { if oldValue && !isDownloading { runEndedAt = Date() } }
+    }
+    /// When the current or last run started and ended, for its elapsed time and time left.
+    @Published var runStartedAt: Date?
+    @Published var runEndedAt: Date?
+    /// When the current album's count started, since `processed` counts from zero for each album.
+    @Published var albumStartedAt: Date?
+    /// The newest files this run downloaded, oldest first, for the photos on the activity page.
+    @Published var recentSaves: [String] = []
     @Published var currentDryRun = false
     @Published var currentAlbum: String?
     @Published var total: Int?
@@ -476,6 +485,10 @@ final class AppModel: ObservableObject {
     }
 
     private func resetRunCounters() {
+        runStartedAt = Date()
+        runEndedAt = nil
+        albumStartedAt = nil
+        recentSaves = []
         currentAlbum = nil
         total = nil
         processed = 0
@@ -560,12 +573,15 @@ final class AppModel: ObservableObject {
             currentAlbum = title
             self.total = total
             processed = 0
+            albumStartedAt = Date()
             if let total, showsFiles { append("\(title): \(total.formatted()) items.") }
         case .progress(let processed):
             self.processed = processed
         case .downloaded(let path, let size):
             downloaded += 1
             bytes += size
+            recentSaves.append(path)
+            if recentSaves.count > 24 { recentSaves.removeFirst(recentSaves.count - 12) }
             if showsFiles { append("Downloaded \(path)") }
         case .wouldDownload(let path):
             downloaded += 1
@@ -652,6 +668,12 @@ final class AppModel: ObservableObject {
             let actual = SMAppService.mainApp.status == .enabled
             if launchAtLogin != actual { launchAtLogin = actual }
         }
+    }
+
+    /// How far through the current album the run is, 0...1, once iCloud has said how many there are.
+    var runFraction: Double? {
+        guard let total, total > 0 else { return nil }
+        return Double(min(processed, total)) / Double(total)
     }
 
     var statusLine: String {
