@@ -21,7 +21,7 @@ enum ScheduleInterval: Int, CaseIterable, Identifiable, Codable {
         case .hourly: return "Every hour"
         case .every6Hours: return "Every 6 hours"
         case .every12Hours: return "Every 12 hours"
-        case .daily: return "Every day"
+        case .daily: return "Every night"
         }
     }
 }
@@ -50,10 +50,12 @@ final class AppModel: ObservableObject {
     // MARK: Account
 
     @Published var phase: Phase = .signedOut
-    /// What the main window shows once signed in: the library, the guided setup that asks one
-    /// question at a time, or the page with every setting.
-    enum Page { case library, setup, settings }
+    /// What the main window shows once signed in: the home page, the activity of the current or
+    /// last run, the guided setup that asks one question at a time, or the page with every setting.
+    enum Page { case library, activity, syncChoice, setup, settings }
     @Published var page: Page = .library
+    /// The section Settings shows, chosen from its sub-menu in the sidebar.
+    @Published var settingsPane: SettingsPane = .freeUp
     var isInside: Bool { phase == .signedIn || phase == .restoring }
     @Published var appleID: String = UserDefaults.standard.string(forKey: "appleID") ?? ""
     @Published var domain: ICloudDomain = ICloudDomain(rawValue: UserDefaults.standard.string(forKey: "domain") ?? "") ?? .com
@@ -71,13 +73,30 @@ final class AppModel: ObservableObject {
     // MARK: Settings (persisted)
 
     @Published var config: SyncConfiguration {
-        didSet { saveConfig() }
+        didSet {
+            saveConfig()
+            if config.directoryPath != oldValue.directoryPath { refreshGlance() }
+        }
     }
     @Published var adpWebAccess: Bool = UserDefaults.standard.bool(forKey: "adpWebAccess") {
         didSet { defaults.set(adpWebAccess, forKey: "adpWebAccess") }
     }
     @Published var schedule: ScheduleInterval = ScheduleInterval(rawValue: UserDefaults.standard.integer(forKey: "schedule")) ?? .off {
         didSet { defaults.set(schedule.rawValue, forKey: "schedule"); reschedule() }
+    }
+    /// The hour a nightly sync starts, 0 to 23.
+    @Published var scheduleHour: Int = UserDefaults.standard.object(forKey: "scheduleHour") as? Int ?? 2 {
+        didSet { defaults.set(scheduleHour, forKey: "scheduleHour"); reschedule() }
+    }
+    /// Ask before a run you start removes photos from iCloud. Scheduled runs never ask.
+    @Published var askBeforeRemoving: Bool = UserDefaults.standard.object(forKey: "askBeforeRemoving") as? Bool ?? true {
+        didSet { defaults.set(askBeforeRemoving, forKey: "askBeforeRemoving") }
+    }
+    /// The easy setup has been answered (or this Mac ran a download before it existed). Until then
+    /// Home offers Get Started.
+    @Published var hasOnboarded: Bool = UserDefaults.standard.object(forKey: "hasOnboarded") as? Bool
+        ?? (UserDefaults.standard.object(forKey: "lastRun") != nil) {
+        didSet { defaults.set(hasOnboarded, forKey: "hasOnboarded") }
     }
     @Published var showInMenuBar: Bool = UserDefaults.standard.object(forKey: "showInMenuBar") as? Bool ?? true {
         didSet { defaults.set(showInMenuBar, forKey: "showInMenuBar") }
@@ -101,7 +120,16 @@ final class AppModel: ObservableObject {
 
     // MARK: Run state
 
-    @Published var isDownloading = false
+    @Published var isDownloading = false {
+        didSet { if oldValue && !isDownloading { runEndedAt = Date() } }
+    }
+    /// When the current or last run started and ended, for its elapsed time and time left.
+    @Published var runStartedAt: Date?
+    @Published var runEndedAt: Date?
+    /// When the current album's count started, since `processed` counts from zero for each album.
+    @Published var albumStartedAt: Date?
+    /// The newest files this run downloaded, oldest first, for the photos on the activity page.
+    @Published var recentSaves: [String] = []
     @Published var currentDryRun = false
     @Published var currentAlbum: String?
     @Published var total: Int?
@@ -116,6 +144,12 @@ final class AppModel: ObservableObject {
     @Published var log: [LogLine] = []
     @Published var lastRun: Date? = UserDefaults.standard.object(forKey: "lastRun") as? Date
     @Published var lastRunSummary: String? = UserDefaults.standard.string(forKey: "lastRunSummary")
+    /// Photos and videos the last full run found in iCloud and has on this Mac, for the home page.
+    @Published var lastRunItems: Int? = UserDefaults.standard.object(forKey: "lastRunItems") as? Int
+    @Published var lastRunFailed: Int = UserDefaults.standard.integer(forKey: "lastRunFailed")
+    /// The folder's size, the disk around it and its newest photos; nil until measured.
+    @Published var glance: LibraryGlance?
+    private var glanceTask: Task<Void, Never>?
     @Published var nextRun: Date?
     /// What the run screen is showing: a download (or dry run), or a delete list.
     enum RunKind { case download, deleteList }
@@ -159,6 +193,7 @@ final class AppModel: ObservableObject {
             Task { await signIn(password: nil, restoring: true) }
         }
         reschedule()
+        refreshGlance()
     }
 
     private func saveConfig() {
@@ -270,8 +305,6 @@ final class AppModel: ObservableObject {
         phase = .signedIn
         accountName = account?.fullName
         defaults.set(true, forKey: "wasSignedIn")
-        // Nothing can be downloaded until there is a folder: start with the questions.
-        if directory == nil, page == .library { page = .setup }
         await loadLibraries()
     }
 
@@ -366,14 +399,24 @@ final class AppModel: ObservableObject {
         if let directory { NSWorkspace.shared.open(directory) }
     }
 
+    /// Measures the folder again, off the main thread. The home page shows the old numbers meanwhile.
+    func refreshGlance() {
+        glanceTask?.cancel()
+        guard let directory else { glance = nil; return }
+        glanceTask = Task {
+            let measured = await Task.detached(priority: .utility) { LibraryGlance.measure(directory) }.value
+            guard !Task.isCancelled, directory == self.directory else { return }
+            glance = measured
+        }
+    }
+
     /// Starts a run. A run that would delete from iCloud asks first (unless `confirmed`).
     func startDownload(dryRun: Bool = false, confirmed: Bool = false, scheduled: Bool = false) {
         guard account != nil, phase == .signedIn, directory != nil, !isDownloading else { return }
         notice = nil
-        page = .library // the run, or the question before it, is on the library page
         var run = config
         run.dryRun = run.dryRun || dryRun
-        if run.deletesFromICloud && !run.dryRun && !confirmed && !scheduled {
+        if run.deletesFromICloud && !run.dryRun && !confirmed && !scheduled && askBeforeRemoving {
             pendingDestructiveRun = true
             return
         }
@@ -383,6 +426,8 @@ final class AppModel: ObservableObject {
         }
         isDownloading = true
         hasRun = true
+        // A run you start opens its activity; a scheduled one leaves you where you are, and Home shows it.
+        if !scheduled { page = .activity }
         runKind = .download
         outcome = .finished
         currentDryRun = run.dryRun
@@ -410,6 +455,14 @@ final class AppModel: ObservableObject {
                     lastRunSummary = text
                     defaults.set(lastRun, forKey: "lastRun")
                     defaults.set(text, forKey: "lastRunSummary")
+                    lastRunFailed = summary.filesFailed
+                    defaults.set(summary.filesFailed, forKey: "lastRunFailed")
+                    // A run cut short by --until-found saw only the newest photos: keep the full count.
+                    if !summary.stoppedByUntilFound, run.albums.isEmpty {
+                        lastRunItems = summary.assetsSeen - summary.assetsFiltered
+                        defaults.set(lastRunItems, forKey: "lastRunItems")
+                    }
+                    refreshGlance()
                 }
                 if notifyWhenDone && (summary.filesDownloaded > 0 || summary.filesFailed > 0 || !scheduled) {
                     notify(title: run.dryRun ? "Dry run finished" : "iCloud Photos downloaded", body: text.prefix(1).uppercased() + text.dropFirst())
@@ -434,6 +487,10 @@ final class AppModel: ObservableObject {
     }
 
     private func resetRunCounters() {
+        runStartedAt = Date()
+        runEndedAt = nil
+        albumStartedAt = nil
+        recentSaves = []
         currentAlbum = nil
         total = nil
         processed = 0
@@ -458,7 +515,7 @@ final class AppModel: ObservableObject {
         panel.message = "Choose a delete list: one FILENAME<TAB>SIZE<TAB>DATE per line"
         guard panel.runModal() == .OK, let url = panel.url, !isDownloading else { return }
         isDownloading = true
-        page = .library
+        page = .activity
         hasRun = true
         runKind = .deleteList
         outcome = .finished
@@ -518,12 +575,15 @@ final class AppModel: ObservableObject {
             currentAlbum = title
             self.total = total
             processed = 0
+            albumStartedAt = Date()
             if let total, showsFiles { append("\(title): \(total.formatted()) items.") }
         case .progress(let processed):
             self.processed = processed
         case .downloaded(let path, let size):
             downloaded += 1
             bytes += size
+            recentSaves.append(path)
+            if recentSaves.count > 24 { recentSaves.removeFirst(recentSaves.count - 12) }
             if showsFiles { append("Downloaded \(path)") }
         case .wouldDownload(let path):
             downloaded += 1
@@ -561,9 +621,16 @@ final class AppModel: ObservableObject {
         scheduleTimer?.invalidate()
         scheduleTimer = nil
         guard schedule != .off else { nextRun = nil; return }
-        let base = lastRun ?? Date()
-        var next = base.addingTimeInterval(TimeInterval(schedule.rawValue))
-        if next < Date().addingTimeInterval(60) { next = Date().addingTimeInterval(60) }
+        let soonest = Date().addingTimeInterval(60)
+        var next: Date
+        if schedule == .daily {
+            // Nightly: the next time the clock reaches the chosen hour.
+            next = Calendar.current.nextDate(after: soonest, matching: DateComponents(hour: scheduleHour, minute: 0),
+                                             matchingPolicy: .nextTime) ?? soonest.addingTimeInterval(86_400)
+        } else {
+            next = (lastRun ?? Date()).addingTimeInterval(TimeInterval(schedule.rawValue))
+            if next < soonest { next = soonest }
+        }
         nextRun = next
         let timer = Timer(fire: next, interval: 0, repeats: false) { [weak self] _ in
             Task { @MainActor in self?.scheduledRunFired() }
@@ -603,6 +670,12 @@ final class AppModel: ObservableObject {
             let actual = SMAppService.mainApp.status == .enabled
             if launchAtLogin != actual { launchAtLogin = actual }
         }
+    }
+
+    /// How far through the current album the run is, 0...1, once iCloud has said how many there are.
+    var runFraction: Double? {
+        guard let total, total > 0 else { return nil }
+        return Double(min(processed, total)) / Double(total)
     }
 
     var statusLine: String {

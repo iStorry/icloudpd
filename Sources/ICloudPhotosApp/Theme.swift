@@ -21,6 +21,17 @@ enum Theme {
 }
 
 extension View {
+    /// The floating sidebar panel in the window's top-left corner. The window buttons are moved
+    /// inside it (see `WindowButtons`), so its content starts below them.
+    func sidebarColumn(width: CGFloat) -> some View {
+        padding(.horizontal, 14)
+            .padding(.bottom, 14)
+            .padding(.top, WindowButtons.clearance)
+            .frame(width: width)
+            .frame(maxHeight: .infinity, alignment: .top)
+            .panel(cornerRadius: 18, fill: Color.white.opacity(0.035), stroke: Color.white.opacity(0.07))
+    }
+
     /// A translucent rounded panel with a hairline edge.
     func panel(cornerRadius: CGFloat = 16, fill: Color = Theme.panelFill, stroke: Color = Theme.panelStroke) -> some View {
         background(fill, in: .rect(cornerRadius: cornerRadius, style: .continuous))
@@ -130,22 +141,6 @@ struct CardRow<Content: View>: View {
     }
 }
 
-/// A label on the left and a switch on the right.
-struct SwitchRow: View {
-    let title: String
-    @Binding var isOn: Bool
-
-    var body: some View {
-        CardRow {
-            Text(title)
-            Spacer(minLength: 8)
-            Toggle(title, isOn: $isOn)
-                .labelsHidden()
-                .toggleStyle(.switch)
-        }
-    }
-}
-
 /// A text field with its label above it, in the rounded well the sign-in screens use.
 struct LabeledField<Content: View>: View {
     let title: String
@@ -198,90 +193,6 @@ struct HeroTile: View {
             .frame(width: 72, height: 72)
             .panel(cornerRadius: 22, fill: Theme.fieldFill, stroke: Theme.fieldStroke)
             .shadow(color: .black.opacity(0.5), radius: 20, y: 16)
-    }
-}
-
-// MARK: Progress ring
-
-/// A circular track with an optional accent arc and anything in the middle.
-struct ProgressRing<Center: View>: View {
-    /// 0...1, or nil for an empty track.
-    var progress: Double?
-    var lineWidth: CGFloat = 10
-    @ViewBuilder var center: Center
-
-    var body: some View {
-        ZStack {
-            Circle().stroke(Color.white.opacity(0.09), lineWidth: lineWidth)
-            if let progress {
-                Circle()
-                    .trim(from: 0, to: max(0.004, min(progress, 1)))
-                    .stroke(Theme.accent, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
-                    .rotationEffect(.degrees(-90))
-                    .animation(.smooth(duration: 0.4), value: progress)
-            }
-            center
-        }
-        .padding(lineWidth / 2)
-    }
-}
-
-// MARK: Photo mosaic
-
-/// The wall of photo-toned tiles on the sign-in screen. The tiles are colour placeholders, not photos.
-struct PhotoMosaic: View {
-    private struct Tile: Identifiable {
-        let id = UUID()
-        let height: CGFloat
-        let top: Color
-        let bottom: Color
-    }
-
-    private static func tile(_ height: CGFloat, _ top: (Double, Double, Double), _ bottom: (Double, Double, Double)) -> Tile {
-        Tile(height: height,
-             top: Color(red: top.0, green: top.1, blue: top.2),
-             bottom: Color(red: bottom.0, green: bottom.1, blue: bottom.2))
-    }
-
-    private static let columns: [(offset: CGFloat, tiles: [Tile])] = [
-        (0, [tile(150, (0.79, 0.54, 0.29), (0.48, 0.29, 0.13)),
-             tile(210, (0.25, 0.5, 0.55), (0.09, 0.22, 0.26)),
-             tile(130, (0.56, 0.65, 0.42), (0.24, 0.31, 0.16)),
-             tile(180, (0.43, 0.5, 0.7), (0.17, 0.21, 0.35)),
-             tile(200, (0.71, 0.4, 0.46), (0.35, 0.16, 0.21))]),
-        (56, [tile(190, (0.71, 0.4, 0.46), (0.35, 0.16, 0.21)),
-              tile(140, (0.85, 0.76, 0.63), (0.54, 0.45, 0.31)),
-              tile(220, (0.18, 0.29, 0.42), (0.06, 0.11, 0.18)),
-              tile(170, (0.79, 0.54, 0.29), (0.48, 0.29, 0.13)),
-              tile(180, (0.25, 0.5, 0.55), (0.09, 0.22, 0.26))]),
-        (14, [tile(120, (0.29, 0.36, 0.32), (0.12, 0.16, 0.14)),
-              tile(200, (0.88, 0.66, 0.6), (0.55, 0.33, 0.27)),
-              tile(160, (0.49, 0.42, 0.66), (0.2, 0.16, 0.31)),
-              tile(150, (0.79, 0.64, 0.29), (0.42, 0.32, 0.13)),
-              tile(210, (0.56, 0.65, 0.42), (0.24, 0.31, 0.16))]),
-    ]
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            ForEach(Self.columns.indices, id: \.self) { index in
-                VStack(spacing: 10) {
-                    ForEach(Self.columns[index].tiles) { tile in
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .fill(LinearGradient(colors: [tile.top, tile.bottom], startPoint: .topLeading, endPoint: .bottomTrailing))
-                            .frame(height: tile.height)
-                    }
-                }
-                .padding(.top, Self.columns[index].offset)
-            }
-        }
-        .padding(.horizontal, 12)
-        .offset(y: -40)
-        // Take the pane's size, not the tiles' own height, so the fade below lines up with the pane.
-        .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .top)
-        .clipped()
-        .mask(LinearGradient(stops: [.init(color: .black, location: 0.45), .init(color: .clear, location: 0.92)],
-                             startPoint: .top, endPoint: .bottom))
-        .accessibilityHidden(true)
     }
 }
 #endif

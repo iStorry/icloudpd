@@ -22,8 +22,8 @@ struct ICloudPhotosApp: App {
         // No title bar: the dark content runs edge to edge, with the traffic lights over it.
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)
-        .defaultSize(width: 980, height: 680)
-        // Setup is a page of the main window, so ⌘, goes there instead of opening a window.
+        .defaultSize(width: 1120, height: 740)
+        // Settings is a page of the main window, so ⌘, goes there instead of opening a window.
         .commands {
             CommandGroup(replacing: .appSettings) { SettingsCommand(model: model) }
         }
@@ -40,9 +40,9 @@ struct SettingsCommand: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        Button("Setup…") {
+        Button("Settings…") {
             openWindow(id: "main")
-            model.page = .setup
+            model.page = .settings
         }
         .keyboardShortcut(",", modifiers: .command)
         .disabled(!model.isInside)

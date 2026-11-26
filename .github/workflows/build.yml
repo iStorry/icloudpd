@@ -1,0 +1,61 @@
+# Builds and tests the app on every pull request and every push to main, and keeps the built app
+# as a download on the run's page.
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A new push to the same branch replaces a build still running for the old one.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and test
+    # The package needs the macOS 26 SDK (Xcode 26 or later).
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show the toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Restore the Swift build cache
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: swiftpm-${{ runner.os }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-${{ github.sha }}
+          restore-keys: swiftpm-${{ runner.os }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-
+
+      - name: Test
+        run: swift test
+
+      - name: Build the app
+        run: scripts/build-app.sh
+
+      - name: Zip the app
+        working-directory: build
+        run: ditto -c -k --keepParent "iCloud Photos Downloader.app" "iCloud-Photos-Downloader.zip"
+
+      # The download is a convenience, so a full artifact quota (it's shared by all of the account's
+      # private repos) shows as a warning instead of failing the check. Tests and build decide pass/fail.
+      - name: Keep the app and command-line tool
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: iCloud-Photos-Downloader-${{ github.sha }}
+          path: |
+            build/iCloud-Photos-Downloader.zip
+            build/icloudpd-swift
+          if-no-files-found: error
+          retention-days: 7
