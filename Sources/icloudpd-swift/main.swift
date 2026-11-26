@@ -352,7 +352,12 @@ func signIn(_ o: Options, console: Console) async throws -> ICloudAccount {
         }
     }
     if o.adpWebAccess {
-        try await account.requestWebAccess { console.log(.info, "Approve the iCloud web access request on your Apple device (waiting 120s)") }
+        let unlocked = try await account.requestWebAccess {
+            console.log(.info, "Approve the iCloud web access request on your Apple device (waiting 120s)")
+        }
+        if !unlocked {
+            console.log(.warning, "iCloud didn't confirm web access to your photos; listing them may fail with \"could not decrypt\"")
+        }
     }
     return account
 }

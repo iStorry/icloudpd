@@ -30,6 +30,8 @@ final class FakeICloud: URLProtocol {
     /// Assets records/lookup answers NOT_FOUND for, as if they left iCloud after the listing.
     nonisolated(unsafe) static var goneOnLookup = Set<String>()
     nonisolated(unsafe) static var lookupRequests = 0
+    /// How many delete requests are answered 503 before iCloud accepts them again (-1: all of them).
+    nonisolated(unsafe) static var throttledModifies = 0
     nonisolated(unsafe) static var listingRequests = 0
     nonisolated(unsafe) static var zoneListRequests = 0
     /// Extra library zones besides PrimarySync, with the indexing state each one reports.
@@ -54,6 +56,7 @@ final class FakeICloud: URLProtocol {
         zones = [:]
         albumTree = [:]
         modifyRequests = 0
+        throttledModifies = 0
     }
 
     override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "fake.icloud.test" }
@@ -169,6 +172,10 @@ final class FakeICloud: URLProtocol {
         if path.hasSuffix("/records/modify") {
             let ops = body["operations"] as? [[String: Any]] ?? []
             FakeICloud.modifyRequests += 1
+            if FakeICloud.throttledModifies != 0 {
+                FakeICloud.throttledModifies -= FakeICloud.throttledModifies > 0 ? 1 : 0
+                return respond(503, data: Data("Service Unavailable".utf8), headers: ["Content-Type": "text/html"])
+            }
             if FakeICloud.refuseBatchDeletes, ops.count > 1 {
                 return respond(200, json: ["records": ops.map { op in
                     ["recordName": (op["record"] as? [String: Any])?["recordName"] ?? "", "serverErrorCode": "ATOMIC_ERROR"]
@@ -354,6 +361,34 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertEqual(FakeICloud.deleteRequests.count, 7)
         XCTAssertEqual(FakeICloud.modifyRequests, 8) // the refused batch, then each photo
         XCTAssertEqual(events.all.filter { if case .deletedFromICloud = $0 { return true } else { return false } }.count, 7)
+    }
+
+    func testThrottledDeleteIsRetried() async throws {
+        SyncEngine.throttleDelay = 1_000
+        FakeICloud.throttledModifies = 2
+        let (summary, _) = try await run { $0.keepICloudRecentDays = 0 }
+        XCTAssertEqual(summary.deletedFromICloud, 7)
+        XCTAssertFalse(summary.deletesPausedByThrottling)
+        XCTAssertEqual(FakeICloud.modifyRequests, 3) // two 503s, then the batch goes through
+    }
+
+    func testKeptThrottlingStopsDeletingButNotDownloading() async throws {
+        SyncEngine.throttleDelay = 1_000
+        // Three pages, so there are later pages that could still try to delete.
+        FakeICloud.reset((0..<250).map { i in
+            FakeICloud.Photo(id: "p\(i)", name: String(format: "IMG_%04d.JPG", i), date: 1_722_427_200_000 - Double(i) * 1000,
+                             data: Data(repeating: UInt8(i % 251), count: 20 + i))
+        })
+        FakeICloud.throttledModifies = -1
+        let (summary, events) = try await run { $0.keepICloudRecentDays = 0 }
+        XCTAssertEqual(summary.assetsSeen, 250)
+        XCTAssertEqual(summary.filesDownloaded, 250)
+        XCTAssertEqual(summary.filesFailed, 0)
+        XCTAssertEqual(summary.deletedFromICloud, 0)
+        XCTAssertTrue(summary.deletesPausedByThrottling)
+        XCTAssertEqual(FakeICloud.modifyRequests, 1 + SyncEngine.throttleRetries) // given up after one request's retries
+        XCTAssertTrue(FakeICloud.photos.allSatisfy { !$0.deleted })
+        XCTAssertTrue(events.logs.contains { $0.contains("stops removing photos from iCloud") })
     }
 
     func testDeleteAfterDownloadOnlyDeletesNewDownloads() async throws {
