@@ -92,14 +92,37 @@ Times depend on your internet connection.
 
 ## Requirements
 
-- macOS 26 Tahoe or later, with Xcode 26+.
-- **Settings > [your name] > iCloud > Access iCloud Data on the Web** turned on.
+- A Mac with macOS 26 Tahoe or later. Xcode 26 or later is only needed to build the app yourself.
+- **Settings › [your name] › iCloud › Access iCloud Data on the Web** turned on, on your iPhone or iPad.
 
-## Download
+## Install and run the app
 
-Each release on the Releases page has the app as **iCloud-Photos-Downloader-*version*.zip**: open it
-and drag the app to Applications. The app isn't notarized yet, so the first time macOS stops it; go to
-**System Settings › Privacy & Security** and click **Open Anyway**.
+1. **Let the app reach your photos.** On your iPhone or iPad, open **Settings › [your name] › iCloud**
+   and turn on **Access iCloud Data on the Web**.
+2. **Download it.** From the [latest release](https://github.com/iStorry/icloudpd/releases/latest),
+   download **iCloud-Photos-Downloader-*version*.zip**. Open the zip, and drag **iCloud Photos Downloader**
+   to your Applications folder.
+3. **Open it the first time.** The app isn't notarized by Apple yet, so macOS stops it the first time
+   you open it. Click **Done**, then go to **System Settings › Privacy & Security**, scroll down, and click
+   **Open Anyway**. You only need to do this once.
+4. **Sign in.** Type your Apple ID and password. Turn on **Remember my password** if you want it to sync
+   by itself at night. Then type the six-digit code that shows up on your iPhone, iPad or other Mac. If
+   your Apple ID is from mainland China, choose **China mainland** under **Region** first.
+   If you use Advanced Data Protection, the app tells you what to approve on your iPhone.
+5. **Answer three questions.** The app asks what you'd like to do, and you choose one:
+   - **Back up only**: save a copy on this Mac and leave iCloud exactly as it is.
+   - **Free up iCloud space**: save the photos on this Mac, then remove them from iCloud. Each photo is
+     only removed after it's safely saved.
+
+   Then pick which photos to include, by the date they were taken, and choose a folder to save them in.
+   An external drive works too.
+6. **Start.** Check your choices on the last page. Click **Preview First** to see what would happen
+   without changing anything, or **Start** to begin. If you chose **Free up iCloud space**, first tick the
+   box saying you understand the photos will leave iCloud. Leave **Keep it going** on and the app saves
+   new photos each night by itself.
+
+After that, the home page shows your newest photos and when the next sync runs. Click **Sync Now** to
+sync right away. You can change any of your answers later in **Settings**.
 
 ## Build and run
 
@@ -122,7 +145,15 @@ yourself (`git tag v1.2.0 && git push origin v1.2.0`) does the same. A version w
 
 ## Command-line tool
 
-`icloudpd-swift` takes icloudpd's options:
+`icloudpd-swift` takes icloudpd's options. To use the one from a release, download
+**icloudpd-swift-*version*-macos.zip**, open it, and in Terminal, in the folder it opened into, run:
+
+```sh
+xattr -d com.apple.quarantine icloudpd-swift   # once: it isn't notarized, so macOS blocks it otherwise
+./icloudpd-swift --username you@example.com --directory ~/Pictures/iCloud
+```
+
+From the source code, use `swift run icloudpd-swift` in its place:
 
 ```sh
 swift run icloudpd-swift --username you@example.com --directory ~/Pictures/iCloud \
