@@ -35,6 +35,8 @@ public struct SyncSummary: Equatable, Sendable {
     public var deletedFromICloud = 0
     public var pruned = 0
     public var stoppedByUntilFound = false
+    /// iCloud kept answering 503 to deletes, so the run stopped deleting and only downloaded.
+    public var deletesPausedByThrottling = false
     public init() {}
 }
 
@@ -256,7 +258,7 @@ public final class SyncEngine: @unchecked Sendable {
 
     // MARK: Downloading one asset
 
-    func process(_ asset: PhotoAsset, http: HTTPClient) async throws -> AssetResult {
+    func process(_ asset: PhotoAsset, library: PhotoLibrary) async throws -> AssetResult {
         var result = AssetResult()
         let c = configuration
         let (files, missing) = plan(asset)
@@ -284,7 +286,7 @@ public final class SyncEngine: @unchecked Sendable {
                     result.present = false
                 } else {
                     do {
-                        try await download(file, to: target, http: http, created: asset.createdDate)
+                        let version = try await downloadRenewingLink(file, of: asset, to: target, library: library)
                         reservations.release(target)
                         if c.setExifDatetime, !file.isLivePhotoVideo, ExifDate.isJPEG(target) {
                             if ExifDate.setIfMissing(target, date: asset.createdDate) {
@@ -292,10 +294,10 @@ public final class SyncEngine: @unchecked Sendable {
                             }
                         }
                         result.downloaded = true
-                        result.bytes += file.version.size
+                        result.bytes += version.size
                         result.createdPaths.append(relative(target))
                         result.expectedPaths.append(relative(target))
-                        emit(.downloaded(path: relative(target), bytes: file.version.size))
+                        emit(.downloaded(path: relative(target), bytes: version.size))
                     } catch {
                         reservations.release(target)
                         if error is CancellationError { throw error }
@@ -340,6 +342,33 @@ public final class SyncEngine: @unchecked Sendable {
         return false
     }
 
+    /// iCloud's download links expire; an old one answers 410 Gone (#38).
+    static func isExpiredLink(_ error: Error) -> Bool {
+        if case ICloudError.http(let status, _) = error, status == 410 { return true }
+        return false
+    }
+
+    /// Downloads a file, and when its link has expired, asks iCloud for the asset again and
+    /// downloads it with the new link. Returns the version that was downloaded.
+    func downloadRenewingLink(_ file: PlannedFile, of asset: PhotoAsset, to target: URL,
+                              library: PhotoLibrary) async throws -> AssetVersion {
+        do {
+            try await download(file, to: target, http: library.http, created: asset.createdDate)
+            return file.version
+        } catch where SyncEngine.isExpiredLink(error) {
+            log(.debug, "The download link for \(relative(target)) expired; asking iCloud for a new one")
+            guard let fresh = try await library.lookUp(asset) else {
+                throw ICloudError.http(status: 410, message: "The download link expired and the photo is no longer in iCloud.")
+            }
+            guard let renewed = plan(fresh).files.first(where: { $0.size == file.size && $0.isLivePhotoVideo == file.isLivePhotoVideo })
+            else {
+                throw ICloudError.http(status: 410, message: "The download link expired and iCloud no longer has this file.")
+            }
+            try await download(renewed, to: target, http: library.http, created: fresh.createdDate)
+            return renewed.version
+        }
+    }
+
     func setDates(_ url: URL, _ date: Date) {
         try? fileManager.setAttributes([.modificationDate: date, .creationDate: date], ofItemAtPath: url.path)
     }
@@ -373,7 +402,8 @@ public final class SyncEngine: @unchecked Sendable {
             } catch {
                 if error is CancellationError || Task.isCancelled { throw CancellationError() }
                 lastError = error
-                if SyncEngine.isFatal(error) { throw error }
+                // An expired link stays expired: the caller gets a new one instead.
+                if SyncEngine.isFatal(error) || SyncEngine.isExpiredLink(error) { throw error }
                 if attempt < attempts {
                     try await Task.sleep(nanoseconds: UInt64(attempt) * 2_000_000_000)
                 }
@@ -408,6 +438,8 @@ public final class SyncEngine: @unchecked Sendable {
         var pruneComplete = prune != nil && c.albums.isEmpty && c.recent == nil && c.untilFound == nil && !library.indexingStateIgnored
 
         let now = Date()
+        /// Set once iCloud keeps answering 503 to deletes: the rest of the run only downloads.
+        var deletesPaused = false
         for album in albums {
             try Task.checkCancellation()
             let total = try? await album.count()
@@ -474,7 +506,7 @@ public final class SyncEngine: @unchecked Sendable {
                                 log(.info, "[DRY RUN] Would delete \(label) in iCloud library \(library.name)")
                                 emit(.deletedFromICloud(name: label))
                                 summary.deletedFromICloud += 1
-                            } else {
+                            } else if !deletesPaused {
                                 toDelete.append(slot.asset)
                             }
                         }
@@ -483,10 +515,16 @@ public final class SyncEngine: @unchecked Sendable {
                     // The next page is only listed when nothing is waiting, so the deletions are
                     // done, and the listing position moved back, before it is asked for.
                     if !toDelete.isEmpty, stop || listed == enqueued {
-                        let deleted = try await deleteFromICloud(toDelete, library: library)
+                        let (deleted, throttled) = try await deleteFromICloud(toDelete, library: library)
                         summary.deletedFromICloud += deleted
                         pager.adjustOffset(by: -deleted)
                         toDelete = []
+                        if throttled && !deletesPaused {
+                            deletesPaused = true
+                            summary.deletesPausedByThrottling = true
+                            log(.warning, "iCloud keeps refusing to delete (HTTP 503), so this run stops removing photos from iCloud and only downloads. "
+                                + "The photos it didn't remove stay in iCloud; the next run removes them.")
+                        }
                     }
                     if stop {
                         group.cancelAll()
@@ -499,7 +537,7 @@ public final class SyncEngine: @unchecked Sendable {
                         guard let slot = slots[index], slot.passed else { continue }
                         let asset = slot.asset
                         downloading += 1
-                        group.addTask { .asset(index, try await self.process(asset, http: photos.http)) }
+                        group.addTask { .asset(index, try await self.process(asset, library: library)) }
                     }
 
                     if let limit, enqueued >= limit { listingDone = true }
@@ -573,8 +611,9 @@ public final class SyncEngine: @unchecked Sendable {
     }
 
     /// Moves photos to Recently Deleted in iCloud, in one request when there are several.
-    /// Returns how many iCloud deleted.
-    func deleteFromICloud(_ assets: [PhotoAsset], library: PhotoLibrary) async throws -> Int {
+    /// Returns how many iCloud deleted, and `throttled` when iCloud kept answering 503: the rest
+    /// stay in iCloud and the run stops deleting, so it can go on downloading (#50).
+    func deleteFromICloud(_ assets: [PhotoAsset], library: PhotoLibrary) async throws -> (deleted: Int, throttled: Bool) {
         var deleted = 0
         func report(_ asset: PhotoAsset) {
             let label = baseFilename(asset)
@@ -582,20 +621,43 @@ public final class SyncEngine: @unchecked Sendable {
             emit(.deletedFromICloud(name: label))
             deleted += 1
         }
-        if assets.count > 1, try await library.delete(assets) {
-            assets.forEach(report)
-            return deleted
+        if assets.count > 1 {
+            guard let accepted = try await withThrottleBackoff({ try await library.delete(assets) }) else {
+                return (deleted, true)
+            }
+            if accepted {
+                assets.forEach(report)
+                return (deleted, false)
+            }
         }
         // A single photo, or iCloud turned the request down as a whole (it is all or nothing):
         // one at a time deletes the ones it does accept.
         for asset in assets {
-            if try await library.delete(asset) {
+            guard let accepted = try await withThrottleBackoff({ try await library.delete(asset) }) else {
+                return (deleted, true)
+            }
+            if accepted {
                 report(asset)
             } else {
                 log(.error, "Could not delete \(baseFilename(asset)) in iCloud: iCloud asked to try again later")
             }
         }
-        return deleted
+        return (deleted, false)
+    }
+
+    /// Runs a request again, waiting longer each time, while iCloud answers 503 ("temporarily
+    /// refusing to serve"). Returns nil when it still does after the last try.
+    func withThrottleBackoff<T>(_ request: () async throws -> T) async throws -> T? {
+        for attempt in 0...SyncEngine.throttleRetries {
+            do {
+                return try await request()
+            } catch ICloudError.http(let status, _) where status == 503 {
+                guard attempt < SyncEngine.throttleRetries else { return nil }
+                log(.warning, "iCloud is limiting requests (HTTP 503); trying again in \(SyncEngine.throttleDelay * UInt64(attempt + 1) / 1_000_000_000) seconds")
+                try await Task.sleep(nanoseconds: SyncEngine.throttleDelay * UInt64(attempt + 1))
+            }
+        }
+        return nil
     }
 
     // MARK: Auto-delete
@@ -672,6 +734,9 @@ private enum SyncStep: Sendable {
 extension SyncEngine {
     /// How many assets may be finished but not yet handled, behind a slow one, before listing pauses.
     static let listingWindow = 300
+    /// Tries after the first when iCloud answers 503 to a delete, waiting 30, 60 then 90 seconds.
+    static let throttleRetries = 3
+    nonisolated(unsafe) static var throttleDelay: UInt64 = 30_000_000_000
 }
 
 /// The sizes of the files that were in each download folder when the run first looked there, read
