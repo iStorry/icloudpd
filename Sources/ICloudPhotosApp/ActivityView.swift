@@ -10,7 +10,12 @@ struct ActivityStage: View {
     /// The details are folded away unless someone opens them; the choice is remembered.
     @AppStorage("showsActivityLog") private var showsLog = false
 
-    private var isDownload: Bool { model.runKind == .download }
+    /// A sync, or sending the folder to Immich: both count photos and show results.
+    private var isDownload: Bool { model.runKind != .deleteList }
+    /// Sending the photos already on this Mac to Immich.
+    private var isUpload: Bool { model.runKind == .immichUpload }
+    /// Where a finished photo is: "on this Mac", or "in Immich" when nothing stays here.
+    private var place: String { model.runKeepsLocal && !isUpload ? "on this Mac" : "in Immich" }
     private var dry: Bool { model.currentDryRun }
     private var running: Bool { model.isDownloading }
 
@@ -21,7 +26,7 @@ struct ActivityStage: View {
                 if isDownload, !results.isEmpty {
                     resultsCard
                 }
-                if isDownload, !dry, !model.recentSaves.isEmpty {
+                if isDownload, !dry, model.runKeepsLocal, !model.recentSaves.isEmpty {
                     recentPhotos
                 }
                 if !running, isDownload, model.failed > 0 {
@@ -85,12 +90,13 @@ struct ActivityStage: View {
             case .failed: return "Couldn't finish"
             }
         }
-        if running { return dry ? "Previewing your sync" : "Saving your photos" }
+        if running { return dry ? "Previewing your sync" : isUpload ? "Sending your photos to Immich" : "Saving your photos" }
         switch model.outcome {
         case .finished:
             if dry { return "Preview finished" }
             if model.failed > 0 { return "Mostly done" }
-            return model.downloaded == 0 && model.deletedFromICloud == 0 ? "Everything was already saved" : "All done!"
+            if isUpload { return model.sent == 0 ? "Everything was already in Immich" : "All sent!" }
+            return model.downloaded == 0 && model.sent == 0 && model.deletedFromICloud == 0 ? "Everything was already saved" : "All done!"
         case .stopped: return "Stopped"
         case .failed: return "Couldn't finish"
         }
@@ -104,7 +110,7 @@ struct ActivityStage: View {
         switch model.outcome {
         case .finished:
             if dry { return "Nothing was changed. Here is what Sync Now would do." }
-            var text = model.failed > 0 ? "Everything else is safe on this Mac." : "Your photos are safe on this Mac."
+            var text = model.failed > 0 ? "Everything else is safe \(place)." : "Your photos are safe \(place)."
             if let end = model.runEndedAt {
                 text += " Finished at \(end.formatted(date: .omitted, time: .shortened))"
                 if let start = model.runStartedAt { text += ", in \(Self.spoken(end.timeIntervalSince(start)))" }
@@ -112,9 +118,11 @@ struct ActivityStage: View {
             }
             return text
         case .stopped:
-            return "Nothing is lost. Press Carry On, or Sync Now later, and it picks up where it left off."
+            return isUpload ? "Nothing is lost. Press Carry On and it picks up where it left off."
+                : "Nothing is lost. Press Carry On, or Sync Now later, and it picks up where it left off."
         case .failed:
-            return Self.plainReason(for: model.log.last(where: \.isError)?.text, otherwise: "Something went wrong talking to iCloud.")
+            return Self.plainReason(for: model.log.last(where: \.isError)?.text,
+                                    otherwise: isUpload ? "Something went wrong talking to Immich." : "Something went wrong talking to iCloud.")
                 + " Nothing is lost, and you can try again."
         }
     }
@@ -149,7 +157,10 @@ struct ActivityStage: View {
 
     private var lookedAt: String {
         guard isDownload else { return "\(model.log.count.formatted()) lines so far" }
-        guard let total = model.total else { return "Getting the list of your photos from iCloud…" }
+        guard let total = model.total else {
+            return isUpload ? "Looking through your folder…" : "Getting the list of your photos from iCloud…"
+        }
+        if isUpload { return "Looked at \(model.processed.formatted()) of \(total.formatted()) photos and videos" }
         return "Looked at \(model.processed.formatted()) of \(total.formatted()) photos"
             + (model.currentAlbum.map { $0 == "All Photos" ? "" : " in \u{201C}\($0)\u{201D}" } ?? "")
     }
@@ -195,17 +206,18 @@ struct ActivityStage: View {
             Button { model.page = .library } label: { Text("Done").frame(minWidth: 50) }
                 .buttonStyle(HeroButtonStyle(height: 44))
                 .keyboardShortcut(.defaultAction)
-            if model.directory != nil, isDownload {
+            if model.directory != nil, isDownload, model.runKeepsLocal {
                 Button { model.openDirectory() } label: { Label("Open Folder", systemImage: "folder") }
                     .buttonStyle(HeroButtonStyle(isPrimary: false, height: 44))
             }
         }
     }
 
-    private var canRun: Bool { model.phase == .signedIn && model.directory != nil }
+    private var canRun: Bool { (isUpload || model.phase == .signedIn) && model.directory != nil }
 
     /// Runs the plan for real. The person has just seen what it does, so it doesn't ask again.
     private func runForReal() {
+        if isUpload { model.uploadExistingToImmich(); return }
         model.startDownload(confirmed: model.config.deletesFromICloud)
     }
 
@@ -221,17 +233,27 @@ struct ActivityStage: View {
     private var results: [Result] {
         var list: [Result] = []
         let size = model.bytes > 0 && !dry ? " (\(AppSidebar.size(Int64(model.bytes))))" : ""
-        if model.downloaded > 0 {
+        if isUpload {
+            // Nothing is downloaded: what counts is what went to Immich, below.
+        } else if model.downloaded > 0 {
             list.append(Result(symbol: "arrow.down.circle.fill", tint: Theme.accentSoft,
                                text: dry ? "\(Self.photos(model.downloaded)) would be saved to this Mac"
-                                         : "\(Self.photos(model.downloaded, new: true)) saved to this Mac\(size)"))
+                                         : model.runKeepsLocal ? "\(Self.photos(model.downloaded, new: true)) saved to this Mac\(size)"
+                                         : "\(Self.photos(model.downloaded, new: true)) downloaded from iCloud\(size)"))
         } else if !running {
             list.append(Result(symbol: "checkmark.circle.fill", tint: Theme.accentSoft,
                                text: dry ? "No new photos would be saved" : "No new photos to save"))
         }
+        if model.sent > 0 {
+            list.append(Result(symbol: "arrow.up.circle.fill", tint: Color(red: 0.5, green: 0.89, blue: 0.66),
+                               text: "\(Self.photos(model.sent)) sent to Immich"))
+        } else if isUpload, !running {
+            list.append(Result(symbol: "checkmark.circle.fill", tint: Theme.accentSoft, text: "No new photos to send"))
+        }
         if model.skipped > 0 {
             list.append(Result(symbol: "checkmark.circle.fill", tint: Color(white: 0.6),
-                               text: "\(Self.photos(model.skipped)) \(model.skipped == 1 ? "was" : "were") already on this Mac"))
+                               text: isUpload ? "\(Self.photos(model.skipped)) \(model.skipped == 1 ? "was" : "were") sent before"
+                                   : "\(Self.photos(model.skipped)) \(model.skipped == 1 ? "was" : "were") already \(model.runKeepsLocal ? "on this Mac" : "saved")"))
         }
         if model.deletedFromICloud > 0 {
             list.append(Result(symbol: "icloud.slash.fill", tint: Theme.warning,
@@ -248,7 +270,7 @@ struct ActivityStage: View {
         }
         if running, model.failed > 0 {
             list.append(Result(symbol: "exclamationmark.circle.fill", tint: Theme.dangerSoft,
-                               text: "\(Self.photos(model.failed)) couldn't be saved so far"))
+                               text: "\(Self.photos(model.failed)) couldn't be \(isUpload ? "sent" : "saved") so far"))
         }
         return list
     }
@@ -315,10 +337,12 @@ struct ActivityStage: View {
                 .frame(width: 44, height: 44)
                 .background(Theme.warning.opacity(0.14), in: .circle)
             VStack(alignment: .leading, spacing: 6) {
-                Text("\(Self.photos(model.failed)) couldn't be saved")
+                Text("\(Self.photos(model.failed)) couldn't be \(isUpload ? "sent" : "saved")")
                     .font(.system(size: 17, weight: .semibold))
-                Text(Self.plainReason(for: model.log.last(where: \.isError)?.text)
-                     + " \(model.failed == 1 ? "It stays" : "They stay") in iCloud and will be tried again the next time you sync.")
+                Text(Self.plainReason(for: model.log.last(where: \.isError)?.text,
+                                      otherwise: isUpload ? "Immich didn't take them this time." : "iCloud didn't send them this time.")
+                     + (isUpload ? " \(model.failed == 1 ? "It stays" : "They stay") on this Mac. Press Try Again to send \(model.failed == 1 ? "it" : "them")."
+                        : " \(model.failed == 1 ? "It stays" : "They stay") in iCloud and will be tried again the next time you sync."))
                     .font(.system(size: 14))
                     .foregroundStyle(Color(white: 0.78))
                     .lineSpacing(2)
@@ -343,6 +367,11 @@ struct ActivityStage: View {
     /// A guess at why, in words anyone understands, from the last error message.
     static func plainReason(for error: String?, otherwise: String = "iCloud didn't send them this time.") -> String {
         let text = (error ?? "").lowercased()
+        // Immich's own messages already say what to do.
+        if text.contains("immich"), let error {
+            let reason = (error.components(separatedBy: ": ").last ?? error).trimmingCharacters(in: .whitespaces)
+            return reason.hasSuffix(".") ? reason : reason + "."
+        }
         if ["network", "internet", "offline", "timed out", "connection"].contains(where: text.contains) {
             return "Your internet connection seems to have dropped."
         }

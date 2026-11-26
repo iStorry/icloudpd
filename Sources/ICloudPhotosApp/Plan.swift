@@ -138,6 +138,15 @@ enum PlanWords {
         return text
     }
 
+    /// The same, when Sync Now sends the photos on to Immich.
+    static func what(_ c: SyncConfiguration, immich: Bool, keepLocal: Bool) -> String {
+        var text = what(c)
+        guard immich else { return text }
+        if keepLocal { return text + " Each one is also sent to Immich." }
+        text = text.replacingOccurrences(of: "are saved on this Mac, then removed from iCloud", with: "are sent to Immich, then removed from iCloud")
+        return text.replacingOccurrences(of: "are saved on this Mac. iCloud", with: "are sent to Immich. iCloud")
+    }
+
     /// "Runs by itself every night at 2:00."
     static func when(_ schedule: ScheduleInterval, hour: Int) -> String {
         switch schedule {

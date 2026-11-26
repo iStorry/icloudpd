@@ -58,6 +58,7 @@ struct DownloadView: View {
                 Group {
                     switch model.page {
                     case .activity: activityStage
+                    case .immich: ImmichStage()
                     case .settings: SettingsStage(pane: $model.settingsPane)
                     case .syncChoice: SyncChoiceStage()
                     default:
@@ -71,7 +72,7 @@ struct DownloadView: View {
         }
         .padding(WindowButtons.margin)
         .confirmationDialog("Remove photos from iCloud?", isPresented: $model.pendingDestructiveRun) {
-            Button("Save Here, Then Remove from iCloud", role: .destructive) { model.startDownload(confirmed: true) }
+            Button(model.immichOnly ? "Send to Immich, Then Remove from iCloud" : "Save Here, Then Remove from iCloud", role: .destructive) { model.startDownload(confirmed: true) }
             Button("Preview First") { model.startDownload(dryRun: true) }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -106,7 +107,7 @@ struct DownloadView: View {
     // MARK: Helpers
 
     private var destructiveMessage: String {
-        var text = "Photos go to Recently Deleted in iCloud once they are safely on this Mac"
+        var text = "Photos go to Recently Deleted in iCloud once they are safely \(model.immichOnly ? "in Immich" : "on this Mac")"
         if let days = model.config.keepICloudRecentDays { text += ", except the last \(days) days" }
         return text + ". Recently Deleted keeps them for 30 days."
     }

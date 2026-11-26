@@ -62,6 +62,10 @@ It's a Swift reimplementation of the open-source [icloudpd](https://github.com/i
 - **Sync**: auto-delete local files removed from iCloud, delete from iCloud after download, keep the last
   N days in iCloud, prune local files that left the library (quarantined, not deleted), a delete list,
   and dry run.
+- **Immich (alpha)**: connect your own [Immich](https://immich.app) server with an API key that may upload
+  (the Immich page in the sidebar). Sync Now then sends each photo to Immich as it's downloaded, and removes it from
+  this Mac once Immich has it unless you keep a copy too. Photos already in the folder can be sent as well.
+  A photo is only removed from iCloud once Immich has it.
 - **Running it**: parallel downloads that resume after interruptions, scheduled runs, a menu bar mode,
   notifications when a run ends, and open at login.
 

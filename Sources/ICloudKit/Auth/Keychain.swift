@@ -7,8 +7,10 @@ import Security
 /// The app and the command-line tool share the same item. On platforms without a Keychain it stores nothing.
 public enum Keychain {
     public static let service = "ICloudPhotos.AppleID"
+    /// The item the Immich API key is kept under.
+    public static let immichService = "ICloudPhotos.Immich"
 
-    public static func password(for account: String) -> String? {
+    public static func password(for account: String, service: String = Keychain.service) -> String? {
         #if canImport(Security)
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -26,9 +28,9 @@ public enum Keychain {
         #endif
     }
 
-    public static func save(_ password: String, for account: String) {
+    public static func save(_ password: String, for account: String, service: String = Keychain.service) {
         #if canImport(Security)
-        delete(account)
+        delete(account, service: service)
         let attributes: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -40,7 +42,7 @@ public enum Keychain {
         #endif
     }
 
-    public static func delete(_ account: String) {
+    public static func delete(_ account: String, service: String = Keychain.service) {
         #if canImport(Security)
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,

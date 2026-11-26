@@ -51,8 +51,8 @@ final class AppModel: ObservableObject {
 
     @Published var phase: Phase = .signedOut
     /// What the main window shows once signed in: the home page, the activity of the current or
-    /// last run, the guided setup that asks one question at a time, or the page with every setting.
-    enum Page { case library, activity, syncChoice, setup, settings }
+    /// last run, Immich, the guided setup that asks one question at a time, or the page with every setting.
+    enum Page { case library, activity, immich, syncChoice, setup, settings }
     @Published var page: Page = .library
     /// The section Settings shows, chosen from its sub-menu in the sidebar.
     @Published var settingsPane: SettingsPane = .freeUp
@@ -112,6 +112,39 @@ final class AppModel: ObservableObject {
         didSet { updateLaunchAtLogin() }
     }
 
+    // MARK: Immich (alpha)
+
+    /// Where the Immich connection stands.
+    enum ImmichState: Equatable {
+        case off, connecting, connected, failed(String)
+    }
+    @Published var immichState: ImmichState = UserDefaults.standard.string(forKey: "immichAddress") == nil ? .off : .connected
+    /// The server's address once connected, as Immich was reached at it.
+    @Published var immichAddress: String = UserDefaults.standard.string(forKey: "immichAddress") ?? ""
+    /// Whose API key it is; nil when the key may upload but not read the account.
+    @Published var immichUser: String? = UserDefaults.standard.string(forKey: "immichUser")
+    /// New downloads go on to Immich.
+    @Published var immichSend: Bool = UserDefaults.standard.bool(forKey: "immichSend") {
+        didSet { defaults.set(immichSend, forKey: "immichSend") }
+    }
+    /// Off: photos only pass through this Mac on their way to Immich.
+    @Published var immichKeepLocal: Bool = UserDefaults.standard.bool(forKey: "immichKeepLocal") {
+        didSet { defaults.set(immichKeepLocal, forKey: "immichKeepLocal") }
+    }
+    /// Files sent to Immich by the current or last run.
+    @Published var sent = 0
+    /// The current or last sync sent its photos on to Immich, and whether this Mac kept them.
+    @Published var runSendsToImmich = false
+    @Published var runKeepsLocal = true
+
+    var immichConnected: Bool { immichState == .connected }
+    /// Sync Now sends its photos to Immich.
+    var sendsToImmich: Bool { immichConnected && immichSend }
+    /// Sync Now leaves nothing on this Mac: Immich gets the only copy that isn't in iCloud.
+    var immichOnly: Bool { sendsToImmich && !immichKeepLocal }
+    /// The server's name without "http://", for showing.
+    var immichHost: String { URL(string: immichAddress)?.host ?? immichAddress }
+
     // MARK: Library and albums
 
     @Published var libraries: [String] = []
@@ -151,8 +184,9 @@ final class AppModel: ObservableObject {
     @Published var glance: LibraryGlance?
     private var glanceTask: Task<Void, Never>?
     @Published var nextRun: Date?
-    /// What the run screen is showing: a download (or dry run), or a delete list.
-    enum RunKind { case download, deleteList }
+    /// What the run screen is showing: a download (or dry run), a delete list, or sending the
+    /// photos already on this Mac to Immich.
+    enum RunKind { case download, deleteList, immichUpload }
     /// How the last run ended.
     enum RunOutcome { case finished, stopped, failed }
     /// True once a run was started: the window then keeps showing it and its activity.
@@ -424,6 +458,11 @@ final class AppModel: ObservableObject {
             append(error.localizedDescription, isError: true)
             return
         }
+        let immich = run.dryRun ? nil : immichClient()
+        if immich == nil, sendsToImmich, !run.dryRun {
+            append("Your Immich API key is missing. Connect again on the Immich page.", isError: true)
+            return
+        }
         isDownloading = true
         hasRun = true
         // A run you start opens its activity; a scheduled one leaves you where you are, and Home shows it.
@@ -431,19 +470,29 @@ final class AppModel: ObservableObject {
         runKind = .download
         outcome = .finished
         currentDryRun = run.dryRun
+        runSendsToImmich = immich != nil
+        runKeepsLocal = immich == nil || immichKeepLocal
         resetRunCounters()
         log = []
         append(run.dryRun ? "Dry run: nothing will be downloaded, moved or deleted." : "Opening your iCloud Photos library…")
+        let keepLocal = immichKeepLocal
 
         downloadTask = Task {
             do {
                 let service = try await photosService()
-                let engine = try SyncEngine(configuration: run, events: eventSink())
+                var transfer: SyncTransfer?
+                if let immich {
+                    // Before anything is downloaded: a server that is off stops the run here.
+                    _ = try await immich.connect()
+                    transfer = .immich(immich, directory: run.directory, ledger: immichLedger(run.directory), keepLocal: keepLocal)
+                }
+                let engine = try SyncEngine(configuration: run, transfer: transfer, events: eventSink())
                 // Show what the run reported before its outcome: here when it throws, below when it ends.
                 defer { flushEvents() }
                 let summary = try await engine.run(photos: service)
                 flushEvents()
                 var parts = ["\(summary.filesDownloaded) new", "\(summary.filesExisting) already saved"]
+                if summary.filesSent > 0 { parts.append("\(summary.filesSent) sent to Immich") }
                 if summary.filesFailed > 0 { parts.append("\(summary.filesFailed) failed") }
                 if summary.deletedFromICloud > 0 { parts.append("\(summary.deletedFromICloud) \(run.dryRun ? "would be " : "")deleted from iCloud") }
                 if summary.deletedLocally > 0 { parts.append("\(summary.deletedLocally) \(run.dryRun ? "would be " : "")removed locally") }
@@ -497,6 +546,7 @@ final class AppModel: ObservableObject {
         downloaded = 0
         skipped = 0
         failed = 0
+        sent = 0
         bytes = 0
         deletedLocally = 0
         deletedFromICloud = 0
@@ -535,6 +585,93 @@ final class AppModel: ObservableObject {
                 _ = try await list.run(library: library, dryRun: dryRun) { level, message in
                     report(.log(level, message))
                 }
+            } catch is CancellationError {
+                outcome = .stopped
+                append("Stopped.")
+            } catch {
+                outcome = .failed
+                append(error.localizedDescription, isError: true)
+            }
+            isDownloading = false
+        }
+    }
+
+    // MARK: Immich (alpha)
+
+    private static let immichKeyAccount = "api-key"
+
+    /// Checks the server and the key, and remembers them when Immich accepts both.
+    func connectImmich(address: String, apiKey: String) async {
+        immichState = .connecting
+        do {
+            let client = try ImmichClient(address: address, apiKey: apiKey)
+            let account = try await client.connect()
+            Keychain.save(apiKey.trimmingCharacters(in: .whitespacesAndNewlines), for: AppModel.immichKeyAccount,
+                          service: Keychain.immichService)
+            immichAddress = client.server.absoluteString
+            immichUser = account.name ?? account.email
+            defaults.set(immichAddress, forKey: "immichAddress")
+            defaults.set(immichUser, forKey: "immichUser")
+            // The record of what was sent belongs to this server and this account.
+            defaults.set((client.server.host ?? "immich") + "-" + (account.id ?? "key"), forKey: "immichLedger")
+            immichState = .connected
+        } catch {
+            immichState = .failed(error.localizedDescription)
+        }
+    }
+
+    func disconnectImmich() {
+        Keychain.delete(AppModel.immichKeyAccount, service: Keychain.immichService)
+        for key in ["immichAddress", "immichUser", "immichLedger"] { defaults.removeObject(forKey: key) }
+        immichAddress = ""
+        immichUser = nil
+        immichSend = false
+        immichState = .off
+    }
+
+    /// The connection a run sends through, or nil when Sync Now doesn't send to Immich.
+    private func immichClient(always: Bool = false) -> ImmichClient? {
+        guard immichConnected, always || immichSend,
+              let key = Keychain.password(for: AppModel.immichKeyAccount, service: Keychain.immichService) else { return nil }
+        return try? ImmichClient(address: immichAddress, apiKey: key)
+    }
+
+    private func immichLedger(_ directory: URL) -> TransferLedger {
+        TransferLedger(directory: directory, name: defaults.string(forKey: "immichLedger") ?? immichHost)
+    }
+
+    /// Sends the photos and videos already in the folder to Immich. The files stay where they are.
+    func uploadExistingToImmich() {
+        guard let directory, !isDownloading else { return }
+        guard let client = immichClient(always: true) else {
+            append("Your Immich API key is missing. Connect again on the Immich page.", isError: true)
+            return
+        }
+        isDownloading = true
+        page = .activity
+        hasRun = true
+        runKind = .immichUpload
+        outcome = .finished
+        notice = nil
+        currentDryRun = false
+        runSendsToImmich = true
+        runKeepsLocal = true
+        resetRunCounters()
+        log = []
+        append("Looking through \(directory.lastPathComponent) for photos and videos…")
+        let ledger = immichLedger(directory)
+        downloadTask = Task {
+            do {
+                _ = try await client.connect()
+                let transfer = SyncTransfer.immich(client, directory: directory, ledger: ledger, keepLocal: true)
+                defer { flushEvents() }
+                let summary = try await FolderUpload.run(directory: directory, transfer: transfer, events: eventSink())
+                flushEvents()
+                var parts = ["\(summary.sent) sent to Immich", "\(summary.alreadySent) sent before"]
+                if summary.failed > 0 { parts.append("\(summary.failed) failed") }
+                let text = parts.joined(separator: ", ")
+                append("Done: \(text).")
+                if notifyWhenDone { notify(title: "Photos sent to Immich", body: text.prefix(1).uppercased() + text.dropFirst()) }
             } catch is CancellationError {
                 outcome = .stopped
                 append("Stopped.")
@@ -599,6 +736,9 @@ final class AppModel: ObservableObject {
             if showsFiles { append("\(currentDryRun ? "Would remove" : "Removed") \(path) (deleted in iCloud)") }
         case .deletedFromICloud:
             deletedFromICloud += 1
+        case .sent(let path):
+            sent += 1
+            if showsFiles { append("Sent \(path) to Immich") }
         case .pruned(let path):
             pruned += 1
             if showsFiles { append("\(currentDryRun ? "Would move" : "Moved") \(path) to .icloudpd-swift-pruned") }

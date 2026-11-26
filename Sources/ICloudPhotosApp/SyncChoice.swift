@@ -27,7 +27,8 @@ struct SyncChoiceStage: View {
                     VStack(spacing: 12) {
                         BigChoice(symbol: "arrow.clockwise", tint: Theme.accentSoft,
                                   title: model.lastRun == nil ? "Go with my plan" : "Same as last time",
-                                  text: PlanWords.what(model.config) + folderSentence,
+                                  text: PlanWords.what(model.config, immich: model.sendsToImmich, keepLocal: model.immichKeepLocal)
+                                      + folderSentence,
                                   note: removing ? "Removed photos wait in Recently Deleted for 30 days, so you can still get them back." : nil,
                                   action: start)
                             .disabled(!canStart)
@@ -67,7 +68,7 @@ struct SyncChoiceStage: View {
     }
 
     private var folderSentence: String {
-        guard let directory = model.directory else { return "" }
+        guard let directory = model.directory, !model.immichOnly else { return "" }
         return " They go in your \u{201C}\(directory.lastPathComponent)\u{201D} folder."
     }
 
