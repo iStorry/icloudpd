@@ -504,8 +504,9 @@ struct HomeStage: View {
         guard model.directory != nil else { return "Pick where your photos should go." }
         var parts: [String] = []
         if let items = model.lastRunItems, items > 0 { parts.append("\(items.formatted()) photos and videos") }
-        if let glance = model.glance { parts.append(AppSidebar.size(glance.bytes)) }
-        return parts.isEmpty ? "On this Mac" : parts.joined(separator: " · ")
+        if let glance = model.glance { parts.append("\(AppSidebar.size(glance.bytes)) on this Mac") }
+        // One fact a line: the two run into each other on a narrow card.
+        return parts.isEmpty ? "On this Mac" : parts.joined(separator: "\n")
     }
 }
 
@@ -763,7 +764,7 @@ struct WelcomeStage: View {
             .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(Color.white.opacity(0.06)))
 
             HStack(alignment: .top, spacing: 10) {
-                HowItWorks(number: 1, title: "Download", text: "Originals, from the dates you pick, into a folder on this Mac.")
+                HowItWorks(number: 1, title: "Download", text: "Full-quality photos, from the dates you pick, into a folder on this Mac.")
                 HowItWorks(number: 2, title: "Check", text: "Each photo is removed from iCloud only once its file is safely here.")
                 HowItWorks(number: 3, title: "Free up space", text: "They go to Recently Deleted, which Apple keeps for 30 days.")
             }

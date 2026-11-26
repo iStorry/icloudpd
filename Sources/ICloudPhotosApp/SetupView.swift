@@ -116,7 +116,10 @@ struct SetupFlow: View {
         switch item {
         case .goal: return answers.goal == .freeUp ? "Free up iCloud space" : "Back up only"
         case .photos:
-            if case .between = answers.photos { return answers.photosSummary }
+            if case .between = answers.photos {
+                let style = Date.FormatStyle.dateTime.month(.abbreviated).year()
+                return "\(min(answers.from, answers.to).formatted(style)) – \(max(answers.from, answers.to).formatted(style))"
+            }
             return SetupAnswers.title(answers.photos)
         case .folder: return answers.directoryPath.isEmpty ? "Not chosen yet" : folderName
         case .review: return "Nothing runs until you start"
@@ -277,11 +280,11 @@ struct SetupFlow: View {
                         Text(answers.directoryPath.isEmpty ? "No folder chosen yet" : folderName)
                             .font(.system(size: 16, weight: .semibold))
                         Text(answers.directoryPath.isEmpty ? "Pick one on this Mac or an external drive"
-                             : (answers.directoryPath as NSString).abbreviatingWithTildeInPath)
+                             : FolderWords.location(answers.directoryPath))
                             .foregroundStyle(Theme.secondary)
-                            .truncationMode(.middle)
                     }
                     .lineLimit(1)
+                    .help((answers.directoryPath as NSString).abbreviatingWithTildeInPath)
                     Spacer(minLength: 8)
                     Button(answers.directoryPath.isEmpty ? "Choose Folder…" : "Change…") {
                         if let url = model.pickFolder(message: "Choose where to save your iCloud photos") {
@@ -325,7 +328,8 @@ struct SetupFlow: View {
             Card {
                 SummaryRow(symbol: "calendar", tint: Color(white: 0.9), title: "Photos", value: answers.photosSummary) { step = .photos }
                 SummaryRow(symbol: "folder.fill", tint: Theme.accentSoft, title: "Saved to",
-                           value: (answers.directoryPath as NSString).abbreviatingWithTildeInPath, detail: savedToDetail) { step = .folder }
+                           value: folderName, detail: savedToDetail) { step = .folder }
+                    .help((answers.directoryPath as NSString).abbreviatingWithTildeInPath)
                 SummaryRow(symbol: answers.goal == .freeUp ? "icloud.slash" : "icloud",
                            tint: answers.goal == .freeUp ? Theme.warning : Color(white: 0.9),
                            title: "Then", value: thenText) { step = .goal }
@@ -365,7 +369,7 @@ struct SetupFlow: View {
 
     private var savedToDetail: String {
         let folders = FolderStructure(rawValue: answers.folderStructure)?.label ?? "Custom folders"
-        return "\(answers.size.qualityLabel), in folders by \(folders.lowercased())"
+        return "\(FolderWords.location(answers.directoryPath)) · \(answers.size.qualityLabel), sorted by \(folders.lowercased())"
     }
 
     private var thenText: String {
@@ -713,6 +717,19 @@ struct DiskBar: View {
             .foregroundStyle(Theme.secondary)
         }
         .accessibilityElement(children: .combine)
+    }
+}
+
+/// Where a folder is, in words: "In “Pictures”, on Macintosh HD". The path itself goes in tooltips.
+enum FolderWords {
+    static func location(_ path: String) -> String {
+        guard !path.isEmpty else { return "" }
+        let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+        let parent = url.deletingLastPathComponent()
+        let place = parent.path == FileManager.default.homeDirectoryForCurrentUser.path
+            ? "In your home folder" : "In \u{201C}\(parent.lastPathComponent)\u{201D}"
+        guard let disk = DiskSpace.of(path)?.name else { return place }
+        return "\(place), on \(disk)"
     }
 }
 

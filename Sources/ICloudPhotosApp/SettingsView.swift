@@ -626,8 +626,9 @@ struct PhotoSettings: View {
     /// "234 GB free on Macintosh HD": where the folder is, without the path.
     private var folderDetail: String {
         guard let directory = model.directory else { return "Choose where your photos go" }
-        guard let space = DiskSpace.of(directory.path) else { return "On this Mac" }
-        return "\(AppSidebar.size(space.available)) free on \(space.name)"
+        let place = FolderWords.location(directory.path)
+        guard let space = DiskSpace.of(directory.path) else { return place }
+        return "\(place) · \(AppSidebar.size(space.available)) free"
     }
 
     private var albumSummary: String {

@@ -180,8 +180,8 @@ struct SignInView: View {
 
     private var form: some View {
         VStack(alignment: .leading, spacing: 16) {
-            AuthHeading(title: "Sign in to iCloud", message: "Use your Apple ID. Your password goes only to Apple.") {
-                Label("Signed in on this Mac only", systemImage: "lock.fill")
+            AuthHeading(title: "Sign in to iCloud", message: "Use the Apple ID you use on your iPhone. Your password goes only to Apple.") {
+                Label("Private and secure", systemImage: "lock.fill")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(Theme.accentSoft)
             }
@@ -202,13 +202,13 @@ struct SignInView: View {
                 }
                 HStack(spacing: 12) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Remember in Keychain").foregroundStyle(Color(white: 0.86))
-                        Text("So scheduled syncs can sign in for you")
+                        Text("Remember my password").foregroundStyle(Color(white: 0.86))
+                        Text("So it can sign in by itself at night")
                             .font(.system(size: 12))
                             .foregroundStyle(Theme.secondary)
                     }
                     Spacer(minLength: 8)
-                    Toggle("Remember in Keychain", isOn: $model.rememberPassword)
+                    Toggle("Remember my password", isOn: $model.rememberPassword)
                         .labelsHidden()
                         .toggleStyle(.switch)
                 }

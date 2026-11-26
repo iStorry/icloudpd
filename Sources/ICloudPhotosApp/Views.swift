@@ -132,7 +132,7 @@ struct AlbumPicker: View {
                     .help("Reload albums")
                     .accessibilityLabel("Reload albums")
                 Button("Done") { dismiss() }
-                    .buttonStyle(PillButtonStyle(height: 32))
+                    .buttonStyle(HeroButtonStyle(height: 32))
                     .keyboardShortcut(.defaultAction)
             }
 
