@@ -15,7 +15,7 @@ struct LibraryGlance: @unchecked Sendable {
     /// The newest photos in the folder, newest first, as small images for the photo wall.
     var photos: [NSImage]
 
-    static let wallSize = PhotoWall.slots.count
+    static let wallSize = PhotoWall.mostTiles
     private static let imageExtensions: Set<String> = ["jpg", "jpeg", "heic", "heif", "png"]
 
     /// Walks the folder once. Slow on a big library, so it runs off the main thread.
@@ -563,14 +563,35 @@ struct HomeStage: View {
 
 /// The newest photos in a wall of tiles, one large one first. Colour placeholders until there are photos.
 struct PhotoWall: View {
-    let photos: [NSImage]
+    typealias Slot = (x: Int, y: Int, w: Int, h: Int)
 
-    /// Column, row and span of each tile on a six by three grid.
-    static let slots: [(x: Int, y: Int, w: Int, h: Int)] = [
-        (0, 0, 2, 2), (2, 0, 1, 1), (3, 0, 1, 1), (4, 0, 2, 1),
-        (2, 1, 1, 1), (3, 1, 1, 1), (4, 1, 1, 1), (5, 1, 1, 1),
-        (0, 2, 1, 1), (1, 2, 1, 1), (2, 2, 1, 1), (3, 2, 1, 1), (4, 2, 1, 1), (5, 2, 1, 1),
-    ]
+    /// How the tiles are laid out: wide for the home page, tall for the sign-in screens.
+    enum Layout {
+        case wide, tall
+
+        var columns: Int { self == .wide ? 6 : 4 }
+        var rows: Int { self == .wide ? 3 : 5 }
+
+        /// Column, row and span of each tile.
+        var slots: [Slot] {
+            switch self {
+            case .wide:
+                return [(0, 0, 2, 2), (2, 0, 1, 1), (3, 0, 1, 1), (4, 0, 2, 1),
+                        (2, 1, 1, 1), (3, 1, 1, 1), (4, 1, 1, 1), (5, 1, 1, 1),
+                        (0, 2, 1, 1), (1, 2, 1, 1), (2, 2, 1, 1), (3, 2, 1, 1), (4, 2, 1, 1), (5, 2, 1, 1)]
+            case .tall:
+                return [(0, 0, 2, 2), (2, 0, 1, 1), (3, 0, 1, 1), (2, 1, 2, 1),
+                        (0, 2, 1, 2), (1, 2, 1, 1), (2, 2, 2, 1), (1, 3, 1, 1), (2, 3, 1, 1), (3, 3, 1, 1),
+                        (0, 4, 2, 1), (2, 4, 1, 1), (3, 4, 1, 1)]
+            }
+        }
+    }
+
+    /// The most tiles any layout has: how many photos the folder scan keeps.
+    static let mostTiles = max(Layout.wide.slots.count, Layout.tall.slots.count)
+
+    let photos: [NSImage]
+    var layout: Layout = .wide
 
     private static let tones: [(Color, Color)] = [
         (Color(red: 0.17, green: 0.29, blue: 0.42), Color(red: 0.91, green: 0.72, blue: 0.52)),
@@ -586,11 +607,12 @@ struct PhotoWall: View {
     var body: some View {
         GeometryReader { geo in
             let gap: CGFloat = 4
-            let column = (geo.size.width - gap * 7) / 6
-            let row = (geo.size.height - gap * 4) / 3
+            let slots = layout.slots
+            let column = (geo.size.width - gap * CGFloat(layout.columns + 1)) / CGFloat(layout.columns)
+            let row = (geo.size.height - gap * CGFloat(layout.rows + 1)) / CGFloat(layout.rows)
             ZStack(alignment: .topLeading) {
-                ForEach(Self.slots.indices, id: \.self) { index in
-                    let slot = Self.slots[index]
+                ForEach(slots.indices, id: \.self) { index in
+                    let slot = slots[index]
                     tile(index)
                         .frame(width: column * CGFloat(slot.w) + gap * CGFloat(slot.w - 1),
                                height: row * CGFloat(slot.h) + gap * CGFloat(slot.h - 1))
@@ -637,26 +659,29 @@ struct StatusDot: View {
 /// The big capsule buttons on the photo wall: a bright primary one and a smoky secondary one.
 struct HeroButtonStyle: ButtonStyle {
     var isPrimary = true
+    var height: CGFloat = 46
 
     func makeBody(configuration: Configuration) -> some View {
-        HeroCapsule(isPrimary: isPrimary, configuration: configuration)
+        HeroCapsule(isPrimary: isPrimary, height: height, configuration: configuration)
     }
 
     private struct HeroCapsule: View {
         let isPrimary: Bool
+        let height: CGFloat
         let configuration: Configuration
         @Environment(\.isEnabled) private var isEnabled
 
         var body: some View {
             configuration.label
                 .font(.system(size: 14, weight: isPrimary ? .semibold : .medium))
-                .foregroundStyle(isPrimary ? Color(white: 0.05) : Color.white)
+                .foregroundStyle(isPrimary ? (isEnabled ? Color(white: 0.05) : Color.white.opacity(0.4)) : Color.white)
                 .padding(.horizontal, isPrimary ? 22 : 20)
-                .frame(height: 46)
-                .background(isPrimary ? AnyShapeStyle(Color(white: 0.96)) : AnyShapeStyle(.ultraThinMaterial), in: .capsule)
+                .frame(height: height)
+                .background(isPrimary ? AnyShapeStyle(isEnabled ? Color(white: 0.96) : Color.white.opacity(0.1)) : AnyShapeStyle(.ultraThinMaterial), in: .capsule)
                 .overlay(Capsule().strokeBorder(Color.white.opacity(isPrimary ? 0 : 0.16)))
                 .shadow(color: .black.opacity(isPrimary && isEnabled ? 0.35 : 0), radius: 15, y: 10)
-                .opacity(isEnabled ? (configuration.isPressed ? 0.75 : 1) : 0.45)
+                // A disabled primary button is drawn as a dim outline of itself; a secondary one fades.
+                .opacity(isEnabled ? (configuration.isPressed ? 0.75 : 1) : (isPrimary ? 1 : 0.45))
                 .contentShape(.capsule)
         }
     }
