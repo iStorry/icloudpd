@@ -21,6 +21,9 @@ public enum VersionSize: String, CaseIterable, Sendable {
     case liveOriginal
     case liveMedium
     case liveThumb
+    /// The edited video of an edited Live Photo (resVidFull on the asset record), the video
+    /// counterpart of `adjusted` (#42).
+    case liveAdjusted
 }
 
 public struct AssetVersion: Equatable, Sendable {
@@ -88,8 +91,11 @@ public struct PhotoAsset: @unchecked Sendable {
     static let photoVersionPrefixes: [(VersionSize, String)] = [
         (.original, "resOriginal"), (.alternative, "resOriginalAlt"), (.medium, "resJPEGMed"),
         (.thumb, "resJPEGThumb"), (.adjusted, "resJPEGFull"), (.liveOriginal, "resOriginalVidCompl"),
-        (.liveMedium, "resVidMed"), (.liveThumb, "resVidSmall"),
+        (.liveMedium, "resVidMed"), (.liveThumb, "resVidSmall"), (.liveAdjusted, "resVidFull"),
     ]
+
+    /// Versions that only count when the asset record has them: that's where iCloud keeps edits.
+    static let editOnlyVersions: Set<VersionSize> = [.liveAdjusted]
 
     static let videoVersionPrefixes: [(VersionSize, String)] = [
         (.original, "resOriginal"), (.medium, "resVidMed"), (.thumb, "resVidSmall"),
@@ -192,7 +198,7 @@ public struct PhotoAsset: @unchecked Sendable {
         for (size, prefix) in prefixes {
             let fields: [String: Any]
             if assetFields[prefix + "Res"] != nil { fields = assetFields }
-            else if masterFields[prefix + "Res"] != nil { fields = masterFields }
+            else if masterFields[prefix + "Res"] != nil, !editOnlyVersions.contains(size) { fields = masterFields }
             else { continue }
             guard let res = (fields[prefix + "Res"] as? [String: Any])?["value"] as? [String: Any],
                   let byteCount = number(res["size"]),

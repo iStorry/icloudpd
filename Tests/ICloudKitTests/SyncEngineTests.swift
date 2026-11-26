@@ -13,6 +13,10 @@ final class FakeICloud: URLProtocol {
         var data: Data
         var deleted = false
         var live: Data?
+        /// An edit: the edited photo (resJPEGFull) and the edited Live Photo video (resVidFull),
+        /// both on the asset record like iCloud keeps them.
+        var edited: Data?
+        var editedLive: Data?
     }
 
     nonisolated(unsafe) static var photos: [Photo] = []
@@ -98,10 +102,18 @@ final class FakeICloud: URLProtocol {
             master["resOriginalVidComplRes"] = ["value": ["size": live.count, "downloadURL": "https://fake.icloud.test/file/\(photo.id)-live/${f}", "fileChecksum": "l"]]
             master["resOriginalVidComplFileType"] = ["value": "com.apple.quicktime-movie"]
         }
+        var asset: [String: Any] = ["masterRef": ["value": ["recordName": "M-\(photo.id)"]], "assetDate": ["value": photo.date]]
+        if let edited = photo.edited {
+            asset["resJPEGFullRes"] = ["value": ["size": edited.count, "downloadURL": "https://fake.icloud.test/file/\(photo.id)-edit/${f}", "fileChecksum": "e"]]
+            asset["resJPEGFullFileType"] = ["value": "public.jpeg"]
+        }
+        if let editedLive = photo.editedLive {
+            asset["resVidFullRes"] = ["value": ["size": editedLive.count, "downloadURL": "https://fake.icloud.test/file/\(photo.id)-editlive/${f}", "fileChecksum": "el"]]
+            asset["resVidFullFileType"] = ["value": "com.apple.quicktime-movie"]
+        }
         return [
             ["recordName": "M-\(photo.id)", "recordType": "CPLMaster", "fields": master],
-            ["recordName": "A-\(photo.id)", "recordType": "CPLAsset", "recordChangeTag": "t1",
-             "fields": ["masterRef": ["value": ["recordName": "M-\(photo.id)"]], "assetDate": ["value": photo.date]]],
+            ["recordName": "A-\(photo.id)", "recordType": "CPLAsset", "recordChangeTag": "t1", "fields": asset],
         ]
     }
 
@@ -118,10 +130,16 @@ final class FakeICloud: URLProtocol {
 
         if path.hasPrefix("/file/") {
             let id = path.split(separator: "/")[1]
-            let isLive = id.hasSuffix("-live")
-            let baseID = isLive ? String(id.dropLast(5)) : String(id)
-            guard let photo = FakeICloud.photos.first(where: { $0.id == baseID }) else { return respond(404) }
-            let data = isLive ? photo.live! : photo.data
+            let parts = id.split(separator: "-", maxSplits: 1).map(String.init)
+            guard let photo = FakeICloud.photos.first(where: { $0.id == parts[0] }) else { return respond(404) }
+            let file: Data?
+            switch parts.count > 1 ? parts[1] : "" {
+            case "live": file = photo.live
+            case "edit": file = photo.edited
+            case "editlive": file = photo.editedLive
+            default: file = photo.data
+            }
+            guard let data = file else { return respond(404) }
             var start = 0
             if let range = request.value(forHTTPHeaderField: "Range"),
                let n = Int(range.dropFirst("bytes=".count).dropLast()) {
@@ -288,6 +306,44 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertGreaterThan(FakeICloud.rangeRequests, 0)
         XCTAssertEqual(try Data(contentsOf: dir.appendingPathComponent("IMG_0000.JPG")), Data(repeating: 0, count: 1000))
         XCTAssertFalse(files().contains { $0.hasSuffix(".part") })
+    }
+
+    func testEditedLivePhotoComesWithItsEditedVideo() async throws {
+        FakeICloud.photos[0].edited = Data(repeating: 0xE0, count: 500)
+        FakeICloud.photos[0].editedLive = Data(repeating: 0xE1, count: 200)
+        let (summary, _) = try await run { $0.sizes = [.adjusted]; $0.recent = 2 }
+        XCTAssertEqual(summary.filesDownloaded, 3)
+        XCTAssertEqual(files(), ["IMG_0000.JPG", "IMG_0000.MOV", "IMG_0001.JPG"])
+        XCTAssertEqual(try Data(contentsOf: dir.appendingPathComponent("IMG_0000.JPG")), Data(repeating: 0xE0, count: 500))
+        XCTAssertEqual(try Data(contentsOf: dir.appendingPathComponent("IMG_0000.MOV")), Data(repeating: 0xE1, count: 200))
+    }
+
+    func testOriginalAndEditedLivePhotoVideosSideBySide() async throws {
+        FakeICloud.photos[0].edited = Data(repeating: 0xE0, count: 500)
+        FakeICloud.photos[0].editedLive = Data(repeating: 0xE1, count: 200)
+        _ = try await run { $0.sizes = [.original, .adjusted]; $0.recent = 1 }
+        XCTAssertEqual(files(), ["IMG_0000-adjusted.JPG", "IMG_0000-adjusted.MOV", "IMG_0000.JPG", "IMG_0000.MOV"])
+        XCTAssertEqual(try Data(contentsOf: dir.appendingPathComponent("IMG_0000.MOV")), Data(repeating: 9, count: 300))
+        XCTAssertEqual(try Data(contentsOf: dir.appendingPathComponent("IMG_0000-adjusted.MOV")), Data(repeating: 0xE1, count: 200))
+
+        // Auto-delete finds both videos once the photo is deleted in iCloud.
+        FakeICloud.photos[0].deleted = true
+        let (deleted, _) = try await run { $0.sizes = [.original, .adjusted]; $0.recent = 1; $0.autoDelete = true }
+        XCTAssertEqual(deleted.deletedLocally, 4)
+    }
+
+    func testUneditedLivePhotoKeepsItsVideoWithAdjusted() async throws {
+        let (_, _) = try await run { $0.sizes = [.adjusted]; $0.recent = 1 }
+        XCTAssertEqual(files(), ["IMG_0000.JPG", "IMG_0000.MOV"])
+        XCTAssertEqual(try Data(contentsOf: dir.appendingPathComponent("IMG_0000.MOV")), Data(repeating: 9, count: 300))
+
+        // resVidFull on the master record isn't an edit.
+        var records = FakeICloud.records(for: FakeICloud.photos[0])
+        var master = records[0]["fields"] as! [String: Any]
+        master["resVidFullRes"] = ["value": ["size": 1, "downloadURL": "https://fake.icloud.test/file/x/${f}"]]
+        master["resVidFullFileType"] = ["value": "com.apple.quicktime-movie"]
+        records[0]["fields"] = master
+        XCTAssertNil(PhotoAsset(master: records[0], asset: records[1]).versions[.liveAdjusted])
     }
 
     func testMoveModeDeletesOldPhotosFromICloud() async throws {
