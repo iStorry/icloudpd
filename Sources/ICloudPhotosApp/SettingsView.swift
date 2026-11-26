@@ -19,10 +19,10 @@ enum SettingsPane: String, CaseIterable, Identifiable {
 
     var summary: String {
         switch self {
-        case .freeUp: return "What leaves iCloud once it's safely on this Mac."
-        case .photos: return "What comes down from iCloud, in what quality, and where it lands."
-        case .general: return "When it runs, and how it keeps you posted."
-        case .advanced: return "Every other option, for when the defaults aren't enough."
+        case .freeUp: return "Make room in iCloud by keeping photos on this Mac instead."
+        case .photos: return "Which photos come to this Mac, how good they look, and where they go."
+        case .general: return "Your account, when it runs by itself, and how it lets you know."
+        case .advanced: return "Extra options. You don't need to change anything here."
         }
     }
 
@@ -122,6 +122,7 @@ struct SettingsSection<Content: View>: View {
 
 /// A setting's name, with an optional line under it, on the left and its control on the right.
 struct SettingRow<Control: View>: View {
+    var icon: RowIcon?
     let title: String
     var detail: String?
     @ViewBuilder var control: Control
@@ -131,6 +132,15 @@ struct SettingRow<Control: View>: View {
         LabeledContent {
             control
         } label: {
+            HStack(spacing: 12) {
+                if let icon { icon }
+                rowText
+            }
+        }
+        .labeledContentStyle(SettingRowStyle())
+    }
+
+    private var rowText: some View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(title)
                     .font(.system(size: 14))
@@ -142,18 +152,37 @@ struct SettingRow<Control: View>: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
-        }
-        .labeledContentStyle(SettingRowStyle())
+    }
+}
+
+/// The small coloured tile at the start of a settings row, as System Settings has.
+struct RowIcon: View {
+    let symbol: String
+    let color: Color
+
+    init(_ symbol: String, _ color: Color) {
+        self.symbol = symbol
+        self.color = color
+    }
+
+    var body: some View {
+        Image(systemName: symbol)
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(.white)
+            .frame(width: 26, height: 26)
+            .background(color.gradient, in: .rect(cornerRadius: 7, style: .continuous))
+            .accessibilityHidden(true)
     }
 }
 
 struct SettingSwitch: View {
+    var icon: RowIcon?
     let title: String
     var detail: String?
     @Binding var isOn: Bool
 
     var body: some View {
-        SettingRow(title: title, detail: detail) {
+        SettingRow(icon: icon, title: title, detail: detail) {
             Toggle(title, isOn: $isOn)
                 .labelsHidden()
                 .toggleStyle(.switch)
@@ -162,13 +191,14 @@ struct SettingSwitch: View {
 }
 
 struct SettingPicker<Value: Hashable, Options: View>: View {
+    var icon: RowIcon?
     let title: String
     var detail: String?
     @Binding var selection: Value
     @ViewBuilder var options: Options
 
     var body: some View {
-        SettingRow(title: title, detail: detail) {
+        SettingRow(icon: icon, title: title, detail: detail) {
             Picker(title, selection: $selection) { options }
                 .labelsHidden()
                 .pickerStyle(.menu)
@@ -197,6 +227,7 @@ struct SettingStepper: View {
 
 /// One of two or more answers in a card, with a radio mark.
 struct ChoiceRow: View {
+    var icon: RowIcon?
     let title: String
     let detail: String
     let isOn: Bool
@@ -204,7 +235,7 @@ struct ChoiceRow: View {
 
     var body: some View {
         Button(action: action) {
-            SettingRow(title: title, detail: detail) {
+            SettingRow(icon: icon, title: title, detail: detail) {
                 Image(systemName: isOn ? "largecircle.fill.circle" : "circle")
                     .font(.system(size: 18))
                     .foregroundStyle(isOn ? Theme.accentSoft : Color.white.opacity(0.3))
@@ -266,12 +297,14 @@ struct FreeUpSettings: View {
     var body: some View {
         PlanSummary()
 
-        SettingsSection(title: "After a photo is saved here") {
-            ChoiceRow(title: "Keep it in iCloud", detail: "A backup. iCloud stays as it is.", isOn: !removing) {
+        SettingsSection(title: "When a photo is safely on this Mac") {
+            ChoiceRow(icon: RowIcon("icloud.fill", .blue), title: "Keep it in iCloud too",
+                      detail: "This Mac gets a copy. iCloud doesn't change.", isOn: !removing) {
                 model.config.keepICloudRecentDays = nil
                 model.config.deleteAfterDownload = false
             }
-            ChoiceRow(title: "Remove it from iCloud", detail: "Frees space. This Mac keeps the full-quality copy.", isOn: removing) {
+            ChoiceRow(icon: RowIcon("icloud.slash.fill", .orange), title: "Remove it from iCloud",
+                      detail: "Makes room in iCloud. This Mac keeps the photo in full quality.", isOn: removing) {
                 if model.config.keepICloudRecentDays == nil { model.config.keepICloudRecentDays = 365 }
                 model.config.deleteAfterDownload = false
                 // Both are refused next to deleting from iCloud.
@@ -281,11 +314,12 @@ struct FreeUpSettings: View {
         }
 
         if removing {
-            SettingsSection(title: "Which photos leave iCloud") {
-                SettingPicker(title: "Older than", detail: "Your recent photos stay in iCloud. This moves forward each day.", selection: ageBinding) {
-                    ForEach(ageChoices, id: \.self) { Text(RemovalAge.label($0)).tag($0) }
+            SettingsSection(title: "Which photos leave iCloud",
+                            footer: "Newer photos stay in iCloud, so they're still on your iPhone. This moves forward by itself every day.") {
+                SettingPicker(icon: RowIcon("clock.arrow.circlepath", .purple), title: "Photos older than", selection: ageBinding) {
+                    ForEach(ageChoices, id: \.self) { Text($0 == 0 ? "Any age" : RemovalAge.label($0)).tag($0) }
                 }
-                SettingRow(title: "Taken", detail: PhotoSettings.rangeText(model.config) + ". Only these are downloaded, so only these can leave iCloud.") {
+                SettingRow(icon: RowIcon("calendar", .red), title: "Dates", detail: PhotoSettings.plainRange(model.config)) {
                     Button("Change") { pane = .photos }
                         .buttonStyle(PillButtonStyle(kind: .secondary, height: 28))
                 }
@@ -293,26 +327,21 @@ struct FreeUpSettings: View {
         }
 
         SettingsSection(title: "Safety",
-                        footer: "Removed photos wait in Recently Deleted for 30 days. You can bring them back in Photos or on iCloud.com until then.") {
-            SettingRow(title: "Only after the file is on this Mac", detail: "Always on. A photo that didn't download stays in iCloud.") {
+                        footer: "Removed photos wait in Recently Deleted in iCloud for 30 days, so you can still get them back.") {
+            SettingRow(icon: RowIcon("checkmark.shield.fill", .green), title: "Only once the photo is safely here",
+                       detail: "Always on. If a photo didn't download, it stays in iCloud.") {
                 Image(systemName: "lock.fill")
                     .foregroundStyle(Theme.secondary)
                     .accessibilityLabel("Always on")
             }
-            SettingSwitch(title: "Ask before a run I start", detail: "Scheduled runs go ahead without asking", isOn: $model.askBeforeRemoving)
-            SettingRow(title: "Preview", detail: "See what would be downloaded and leave iCloud, without changing anything") {
-                Button("Run Preview") { model.startDownload(dryRun: true) }
+            SettingSwitch(icon: RowIcon("hand.raised.fill", .yellow), title: "Ask me before removing photos",
+                          detail: "Not asked when it runs by itself at night", isOn: $model.askBeforeRemoving)
+            SettingRow(icon: RowIcon("eye.fill", .teal), title: "Try it first",
+                       detail: "See what would happen, without changing anything") {
+                Button("Preview") { model.startDownload(dryRun: true) }
                     .buttonStyle(PillButtonStyle(kind: .secondary, height: 28))
                     .disabled(model.phase != .signedIn || model.directory == nil)
             }
-        }
-
-        SettingsSection(title: "This Mac",
-                        footer: "Set-aside files go into a .icloudpd-swift-pruned folder inside your download folder; nothing is deleted.") {
-            SettingSwitch(title: "Delete here when deleted in iCloud", detail: "When a photo is in Recently Deleted, its file on this Mac goes too",
-                          isOn: $model.config.autoDelete)
-            SettingSwitch(title: "Set aside files whose photo is gone from iCloud", detail: "Only files this app downloaded",
-                          isOn: $model.config.pruneOrphans)
         }
     }
 
@@ -343,14 +372,14 @@ struct PlanSummary: View {
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 8)
                 if let next = model.nextRun {
-                    Text("Next run \(HomeStage.dayAndTime(next))")
+                    Text("Next sync \(HomeStage.dayAndTime(next))")
                         .font(.system(size: 12))
                         .foregroundStyle(Color(red: 0.66, green: 0.8, blue: 1))
                 }
             }
             HStack(spacing: 2) {
                 if removing {
-                    bar("On this Mac only", isOn: true).layoutPriority(1)
+                    bar("Only on this Mac", isOn: true).layoutPriority(1)
                     if age > 0 { bar("Also in iCloud", isOn: false).frame(width: 120) }
                 } else {
                     bar("In iCloud and on this Mac", isOn: false)
@@ -360,10 +389,10 @@ struct PlanSummary: View {
             .clipShape(.rect(cornerRadius: 8, style: .continuous))
             .accessibilityHidden(true)
             HStack {
-                Text(PhotoSettings.rangeText(model.config))
+                Text(removing && age > 0 ? "Older photos" : PhotoSettings.plainRange(model.config))
                 Spacer()
                 if removing, age > 0 {
-                    Text("Taken after \(RemovalAge.cutoff(age).formatted(date: .abbreviated, time: .omitted)): stays in iCloud")
+                    Text("Since \(RemovalAge.cutoff(age).formatted(date: .abbreviated, time: .omitted))")
                 }
             }
             .font(.system(size: 11))
@@ -404,17 +433,17 @@ struct PhotoSettings: View {
     var body: some View {
         SettingsSection(title: "From iCloud") {
             if model.libraries.count > 1 {
-                SettingPicker(title: "Library", selection: libraryBinding) {
+                SettingPicker(icon: RowIcon("books.vertical.fill", .brown), title: "Library", selection: libraryBinding) {
                     ForEach(model.libraries, id: \.self) { Text(model.libraryLabel($0)).tag($0) }
                 }
             }
-            SettingRow(title: "Albums", detail: albumSummary) {
+            SettingRow(icon: RowIcon("rectangle.stack.fill", .blue), title: "Albums", detail: albumSummary) {
                 Button("Choose…") { showingAlbums = true }
                     .buttonStyle(PillButtonStyle(kind: .secondary, height: 28))
                     .disabled(model.phase != .signedIn)
             }
-            SettingPicker(title: "Taken", detail: "By the date each photo was taken", selection: rangeBinding) {
-                Text("Any time").tag(DateRange.anyTime)
+            SettingPicker(icon: RowIcon("calendar", .red), title: "Dates", detail: "By the day each photo was taken", selection: rangeBinding) {
+                Text("Any date").tag(DateRange.anyTime)
                 Text("Before a date").tag(DateRange.before)
                 Text("After a date").tag(DateRange.after)
                 Text("Between two dates").tag(DateRange.between)
@@ -425,61 +454,53 @@ struct PhotoSettings: View {
             if model.config.skipCreatedAfter != nil {
                 SettingRow(title: model.config.skipCreatedBefore == nil ? "Before" : "To") { datePicker(toBinding) }
             }
-            SettingRow(title: "Include") {
-                HStack(spacing: 6) {
-                    IncludeChip(title: "Photos", isOn: inverted(\.skipPhotos))
-                    IncludeChip(title: "Videos", isOn: inverted(\.skipVideos))
-                    IncludeChip(title: "Live Photo videos", isOn: inverted(\.skipLivePhotos))
-                    IncludeChip(title: "Screenshots", isOn: inverted(\.skipScreenshots))
-                }
-            }
         }
 
-        SettingsSection(title: "Quality") {
-            SettingPicker(title: "Photos", detail: "Originals are exactly as taken. Pick these when clearing iCloud.", selection: photoQuality) {
+        SettingsSection(title: "What to bring over") {
+            SettingSwitch(icon: RowIcon("photo.fill", .blue), title: "Photos", isOn: inverted(\.skipPhotos))
+            SettingSwitch(icon: RowIcon("video.fill", .pink), title: "Videos", isOn: inverted(\.skipVideos))
+            SettingSwitch(icon: RowIcon("livephoto", .yellow), title: "Live Photo videos",
+                          detail: "The few seconds of movement saved with a Live Photo", isOn: inverted(\.skipLivePhotos))
+            SettingSwitch(icon: RowIcon("camera.viewfinder", .gray), title: "Screenshots", isOn: inverted(\.skipScreenshots))
+        }
+
+        SettingsSection(title: "Quality",
+                        footer: "Choose full quality when you're removing photos from iCloud: this Mac will have the only copy.") {
+            SettingPicker(icon: RowIcon("photo", .indigo), title: "Photos", selection: photoQuality) {
                 ForEach([PhotoSize.original, .adjusted, .medium, .thumb], id: \.self) { Text($0.qualityLabel).tag(Optional($0)) }
                 if model.config.sizes.count > 1 || model.config.sizes == [.alternative] {
                     Text("Several (set in Advanced)").tag(PhotoSize?.none)
                 }
             }
-            SettingPicker(title: "Videos", selection: videoQuality) {
+            SettingPicker(icon: RowIcon("video", .pink), title: "Videos", selection: videoQuality) {
                 Text("Same as photos").tag("same")
-                Text("Originals").tag("original")
-                Text("Medium").tag("medium")
-                Text("Thumbnail").tag("thumb")
+                Text("Full quality").tag("original")
+                Text("Smaller").tag("medium")
+                Text("Tiny preview").tag("thumb")
                 Divider()
-                Text("Don't download").tag("none")
+                Text("Don't bring videos").tag("none")
             }
-            SettingPicker(title: "Live Photo videos", selection: liveQuality) {
-                Text("Originals").tag("original")
-                Text("Medium").tag("medium")
-                Text("Thumbnail").tag("thumb")
+            SettingPicker(icon: RowIcon("livephoto", .yellow), title: "Live Photo videos", selection: liveQuality) {
+                Text("Full quality").tag("original")
+                Text("Smaller").tag("medium")
+                Text("Tiny preview").tag("thumb")
                 Divider()
-                Text("Don't download").tag("none")
+                Text("Just the photo").tag("none")
             }
         }
 
         SettingsSection(title: "On this Mac") {
-            HStack(spacing: 12) {
-                Image(systemName: "folder.fill")
-                    .foregroundStyle(Theme.accentSoft)
-                    .frame(width: 34, height: 34)
-                    .background(Theme.accent.opacity(0.18), in: .rect(cornerRadius: 10, style: .continuous))
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(model.directory?.lastPathComponent ?? "No folder chosen").font(.system(size: 14))
-                    Text(folderDetail).font(.system(size: 12)).foregroundStyle(Theme.secondary).truncationMode(.middle)
-                }
-                .lineLimit(1)
-                Spacer(minLength: 8)
+            SettingRow(icon: RowIcon("folder.fill", .cyan), title: model.directory?.lastPathComponent ?? "No folder yet",
+                       detail: folderDetail) {
                 if model.directory != nil {
                     Button("Show") { model.openDirectory() }
                 }
                 Button("Change…") { model.chooseDirectory() }
             }
             .buttonStyle(PillButtonStyle(kind: .secondary, height: 28))
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-            SettingPicker(title: "Folders", detail: FolderExample.path(for: model.config.folderStructure), selection: layoutBinding) {
+            .help(model.directory.map { ($0.path as NSString).abbreviatingWithTildeInPath } ?? "")
+            SettingPicker(icon: RowIcon("folder.badge.gearshape", .orange), title: "Sort into folders by",
+                          detail: Self.layoutExample(model.config.folderStructure), selection: layoutBinding) {
                 ForEach(FolderStructure.allCases, id: \.self) { Text($0.label).tag($0.rawValue) }
                 Text("Custom").tag("custom")
             }
@@ -511,6 +532,24 @@ struct PhotoSettings: View {
         case let (nil, to?): return "Taken before \(to)"
         case (nil, nil): return "Taken any time"
         }
+    }
+
+    /// The same, for a row: "Any date", "Before 26 Nov 2025", "3 Jan 2015 to 26 Nov 2025".
+    static func plainRange(_ config: SyncConfiguration) -> String {
+        let from = config.skipCreatedBefore?.resolve().formatted(date: .abbreviated, time: .omitted)
+        let to = config.skipCreatedAfter?.resolve().formatted(date: .abbreviated, time: .omitted)
+        switch (from, to) {
+        case let (from?, to?): return "\(from) to \(to)"
+        case let (from?, nil): return "After \(from)"
+        case let (nil, to?): return "Before \(to)"
+        case (nil, nil): return "Any date"
+        }
+    }
+
+    /// "2026 › 11 › 26" for a photo taken today, or "All in one folder".
+    static func layoutExample(_ format: String) -> String {
+        let folder = (try? FolderFormat(format))?.path(for: Date()) ?? ""
+        return folder.isEmpty ? "All in one folder" : "Like " + folder.split(separator: "/").joined(separator: " › ")
     }
 
     private var rangeBinding: Binding<DateRange> {
@@ -591,16 +630,16 @@ struct PhotoSettings: View {
                 })
     }
 
+    /// "234 GB free on Macintosh HD": where the folder is, without the path.
     private var folderDetail: String {
-        guard let directory = model.directory else { return "Choose where photos go" }
-        var text = (directory.path as NSString).abbreviatingWithTildeInPath
-        if let space = DiskSpace.of(directory.path) { text += " · \(AppSidebar.size(space.available)) free" }
-        return text
+        guard let directory = model.directory else { return "Choose where your photos go" }
+        guard let space = DiskSpace.of(directory.path) else { return "On this Mac" }
+        return "\(AppSidebar.size(space.available)) free on \(space.name)"
     }
 
     private var albumSummary: String {
         switch model.config.albums.count {
-        case 0: return "All Photos"
+        case 0: return "All your photos"
         case 1: return model.config.albums[0]
         default: return "\(model.config.albums.count) albums"
         }
@@ -635,7 +674,7 @@ struct GeneralSettings: View {
                                            startPoint: .topLeading, endPoint: .bottomTrailing), in: .circle)
             VStack(alignment: .leading, spacing: 2) {
                 Text(model.accountName ?? model.appleID).font(.system(size: 15, weight: .semibold))
-                Text("\(model.appleID) · \(model.domain == .cn ? "China mainland (icloud.com.cn)" : "Worldwide (icloud.com)")")
+                Text(model.appleID)
                     .font(.system(size: 12))
                     .foregroundStyle(Theme.secondary)
             }
@@ -648,13 +687,16 @@ struct GeneralSettings: View {
         .padding(.vertical, 16)
         .panel()
 
-        SettingsSection(title: "Schedule",
-                        footer: "Runs while the app is open, in the window or the menu bar. New photos are picked up and your Free up iCloud choice is applied.") {
-            SettingPicker(title: "Sync automatically", selection: $model.schedule) {
-                ForEach(ScheduleInterval.allCases) { Text($0.label).tag($0) }
+        SettingsSection(title: "Runs by itself",
+                        footer: "It runs while the app is open, in this window or in the menu bar.") {
+            SettingPicker(icon: RowIcon("arrow.triangle.2.circlepath", .green), title: "Check for new photos",
+                          selection: $model.schedule) {
+                ForEach(ScheduleInterval.allCases) { interval in
+                    Text(interval == .off ? "Only when I press Sync Now" : interval.label).tag(interval)
+                }
             }
             if model.schedule == .daily {
-                SettingPicker(title: "At", selection: $model.scheduleHour) {
+                SettingPicker(icon: RowIcon("moon.stars.fill", .indigo), title: "At", selection: $model.scheduleHour) {
                     ForEach(0..<24, id: \.self) { hour in
                         Text(DateComponents(calendar: .current, hour: hour, minute: 0).date?
                             .formatted(date: .omitted, time: .shortened) ?? "\(hour):00").tag(hour)
@@ -662,18 +704,22 @@ struct GeneralSettings: View {
                 }
             }
             if let next = model.nextRun {
-                SettingRow(title: "Next run") {
-                    Text(next.formatted(date: .abbreviated, time: .shortened)).foregroundStyle(Theme.secondary)
+                SettingRow(icon: RowIcon("calendar.badge.clock", .red), title: "Next time") {
+                    Text(HomeStage.dayAndTime(next).prefix(1).uppercased() + HomeStage.dayAndTime(next).dropFirst())
+                        .foregroundStyle(Theme.secondary)
                 }
             }
-            SettingSwitch(title: "Open at login", detail: "So scheduled syncs happen without opening the app", isOn: $model.launchAtLogin)
+            SettingSwitch(icon: RowIcon("power", .gray), title: "Start when I log in",
+                          detail: "So it can run at night without you opening it", isOn: $model.launchAtLogin)
         }
 
-        SettingsSection(title: "Notifications and menu bar",
+        SettingsSection(title: "Keeping you posted",
                         footer: AppModel.canNotify ? nil
-                            : "Notifications and Open at Login need the app bundle: build it with scripts/build-app.sh.") {
-            SettingSwitch(title: "Show in menu bar", detail: "Progress and Sync Now without opening the window", isOn: $model.showInMenuBar)
-            SettingSwitch(title: "Notify when a sync finishes", detail: "When something was saved or failed", isOn: $model.notifyWhenDone)
+                            : "Notifications and starting at login need the app bundle: build it with scripts/build-app.sh.") {
+            SettingSwitch(icon: RowIcon("menubar.rectangle", .blue), title: "Show in the menu bar",
+                          detail: "See how it's going and press Sync Now from the top of the screen", isOn: $model.showInMenuBar)
+            SettingSwitch(icon: RowIcon("bell.badge.fill", .red), title: "Tell me when it's done",
+                          detail: "Only when photos were saved, removed or couldn't be", isOn: $model.notifyWhenDone)
         }
     }
 }
@@ -686,15 +732,24 @@ struct AdvancedSettings: View {
     @State private var allowUndated = false
 
     var body: some View {
+        SettingsSection(title: "Keep this Mac in step with iCloud",
+                        footer: "Set-aside files go into a .icloudpd-swift-pruned folder inside your photos folder; nothing is deleted.") {
+            SettingSwitch(title: "Delete photos here when they're deleted in iCloud",
+                          detail: "When a photo is in Recently Deleted, its file on this Mac goes too",
+                          isOn: $model.config.autoDelete)
+            SettingSwitch(title: "Set aside files whose photo is gone from iCloud",
+                          detail: "Only files this app downloaded", isOn: $model.config.pruneOrphans)
+        }
+
         SettingsSection(title: "Runs",
                         footer: "More parallel downloads finish sooner on a fast connection. \"Stop after N already downloaded\" always downloads one at a time.") {
             SettingStepper(title: "Parallel downloads", value: $model.config.concurrentDownloads, range: 1...16)
-            SettingPicker(title: "Activity list shows", selection: $model.logLevel) {
+            SettingPicker(title: "Activity details show", selection: $model.logLevel) {
                 Text("Each file and any problem").tag(SyncLogLevel.info)
                 Text("Everything, in detail").tag(SyncLogLevel.debug)
                 Text("Problems only").tag(SyncLogLevel.error)
             }
-            SettingSwitch(title: "Always do a dry run", detail: "Nothing is downloaded, moved or removed", isOn: $model.config.dryRun)
+            SettingSwitch(title: "Always just preview", detail: "Nothing is downloaded, moved or removed", isOn: $model.config.dryRun)
         }
 
         SettingsSection(title: "Sizes",

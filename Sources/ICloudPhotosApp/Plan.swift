@@ -185,11 +185,11 @@ extension PhotoSize {
     /// The name in the quality pickers.
     var qualityLabel: String {
         switch self {
-        case .original: return "Originals"
-        case .adjusted: return "With edits"
+        case .original: return "Full quality"
+        case .adjusted: return "With your edits"
         case .alternative: return "RAW + JPEG pair"
-        case .medium: return "Medium"
-        case .thumb: return "Thumbnail"
+        case .medium: return "Smaller"
+        case .thumb: return "Tiny preview"
         }
     }
 }
