@@ -446,6 +446,7 @@ final class AppModel: ObservableObject {
                 var parts = ["\(summary.filesDownloaded) new", "\(summary.filesExisting) already saved"]
                 if summary.filesFailed > 0 { parts.append("\(summary.filesFailed) failed") }
                 if summary.deletedFromICloud > 0 { parts.append("\(summary.deletedFromICloud) \(run.dryRun ? "would be " : "")deleted from iCloud") }
+                if summary.deletesPausedByThrottling { parts.append("removing from iCloud paused because iCloud was busy") }
                 if summary.deletedLocally > 0 { parts.append("\(summary.deletedLocally) \(run.dryRun ? "would be " : "")removed locally") }
                 if summary.pruned > 0 { parts.append("\(summary.pruned) orphans \(run.dryRun ? "would be " : "")moved aside") }
                 let text = parts.joined(separator: ", ")
