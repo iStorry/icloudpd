@@ -12,6 +12,9 @@ struct LibraryGlance: @unchecked Sendable {
     var bytes: Int64
     var volumeCapacity: Int64?
     var volumeAvailable: Int64?
+    /// The disk's name, and whether it is the Mac's own disk rather than an external drive.
+    var volumeName: String?
+    var isStartupDisk = true
     /// The newest photos in the folder, newest first, as small images for the photo wall.
     var photos: [NSImage]
 
@@ -41,10 +44,13 @@ struct LibraryGlance: @unchecked Sendable {
         }
         newest.sort { $0.date > $1.date }
         let photos = newest.prefix(wallSize).compactMap { thumbnail(of: $0.url) }
-        let volume = try? root.resourceValues(forKeys: [.volumeTotalCapacityKey, .volumeAvailableCapacityForImportantUsageKey])
+        let volume = try? root.resourceValues(forKeys: [.volumeTotalCapacityKey, .volumeAvailableCapacityForImportantUsageKey,
+                                                        .volumeLocalizedNameKey, .volumeIsRootFileSystemKey])
         return LibraryGlance(bytes: bytes,
                              volumeCapacity: volume?.volumeTotalCapacity.map(Int64.init),
                              volumeAvailable: volume?.volumeAvailableCapacityForImportantUsage,
+                             volumeName: volume?.volumeLocalizedName,
+                             isStartupDisk: volume?.volumeIsRootFileSystem ?? true,
                              photos: photos)
     }
 
@@ -86,10 +92,12 @@ struct AppSidebar: View {
                 item("Settings", "slider.horizontal.3", .settings)
             }
 
-            if model.directory != nil { storage }
-
             Spacer(minLength: 0)
-            account
+
+            VStack(spacing: 8) {
+                if model.directory != nil { storage }
+                account
+            }
         }
         .sidebarColumn(width: 264)
     }
@@ -115,62 +123,56 @@ struct AppSidebar: View {
         .accessibilityAddTraits(isOn ? .isSelected : [])
     }
 
+    /// How much room the folder's disk has, in plain words: free space first, then what the photos take.
     private var storage: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            SectionHeader(title: "On this Mac").padding(.horizontal, -4)
-            if let glance = model.glance {
-                HStack(alignment: .firstTextBaseline) {
-                    Text(Self.size(glance.bytes))
-                        .font(.system(size: 22, weight: .semibold))
-                        .tracking(-0.5)
-                    Spacer(minLength: 4)
-                    if let capacity = glance.volumeCapacity {
-                        Text("of \(Self.size(capacity))").foregroundStyle(Theme.secondary)
-                    }
-                }
-                if let capacity = glance.volumeCapacity, let free = glance.volumeAvailable, capacity > 0 {
-                    let library = Double(glance.bytes) / Double(capacity)
-                    let other = Double(max(0, capacity - free - glance.bytes)) / Double(capacity)
-                    GeometryReader { geo in
-                        HStack(spacing: 2) {
-                            Rectangle().fill(Theme.accent).frame(width: max(3, geo.size.width * library))
-                            Rectangle().fill(Color.white.opacity(0.26)).frame(width: geo.size.width * other)
-                            Spacer(minLength: 0)
-                        }
-                    }
-                    .frame(height: 6)
-                    .background(Color.white.opacity(0.08))
-                    .clipShape(.capsule)
-                    .accessibilityHidden(true)
-                    HStack(spacing: 12) {
-                        legend("Photos", Theme.accent)
-                        legend("Other", Color.white.opacity(0.26))
-                        Spacer(minLength: 4)
-                        Text("\(Self.size(free)) free").fixedSize()
-                    }
-                    .lineLimit(1)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 7) {
+                Image(systemName: model.glance?.isStartupDisk == false ? "externaldrive" : "internaldrive")
                     .font(.system(size: 12))
+                Text(model.glance.map { $0.isStartupDisk ? "Space on this Mac" : "Space on \($0.volumeName ?? "the drive")" }
+                     ?? "Space on this Mac")
+            }
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(Theme.secondary)
+            .lineLimit(1)
+
+            if let glance = model.glance, let capacity = glance.volumeCapacity, let free = glance.volumeAvailable, capacity > 0 {
+                let low = free < 10_000_000_000 || Double(free) / Double(capacity) < 0.05
+                Text("\(Text("\(Self.size(free)) free").font(.system(size: 15, weight: .semibold)).foregroundStyle(low ? Theme.warning : Color.primary)) of \(Self.size(capacity))")
+                    .font(.system(size: 13))
                     .foregroundStyle(Theme.secondary)
+                    .lineLimit(1)
+                GeometryReader { geo in
+                    let photos = Double(glance.bytes) / Double(capacity)
+                    let other = Double(max(0, capacity - free - glance.bytes)) / Double(capacity)
+                    HStack(spacing: 1) {
+                        Rectangle().fill(Theme.accent).frame(width: max(2, geo.size.width * photos))
+                        Rectangle().fill(Color.white.opacity(0.26)).frame(width: geo.size.width * other)
+                        Spacer(minLength: 0)
+                    }
                 }
+                .frame(height: 6)
+                .background(Color.white.opacity(0.08))
+                .clipShape(.capsule)
+                .accessibilityHidden(true)
+                Text(low ? "Running low on space" : "Your photos use \(Self.size(glance.bytes))")
+                    .font(.system(size: 12))
+                    .foregroundStyle(low ? Theme.warning : Theme.secondary)
             } else {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
-                    Text("Measuring the folder…")
+                    Text("Checking…")
                 }
+                .font(.system(size: 12))
                 .foregroundStyle(Theme.secondary)
             }
         }
-        .padding(.horizontal, 10)
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.white.opacity(0.04), in: .rect(cornerRadius: 14, style: .continuous))
+        .accessibilityElement(children: .combine)
     }
 
-    private func legend(_ title: String, _ color: Color) -> some View {
-        HStack(spacing: 6) {
-            RoundedRectangle(cornerRadius: 2).fill(color).frame(width: 8, height: 8)
-            Text(title)
-        }
-    }
-
-    /// "412 GB", "1.2 TB", "8.5 GB": short enough for the narrow sidebar.
     static func size(_ bytes: Int64) -> String {
         let gigabytes = Double(bytes) / 1e9
         if gigabytes >= 1_000 { return (gigabytes / 1_000).formatted(.number.precision(.fractionLength(0...1))) + " TB" }
