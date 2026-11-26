@@ -21,7 +21,7 @@ enum ScheduleInterval: Int, CaseIterable, Identifiable, Codable {
         case .hourly: return "Every hour"
         case .every6Hours: return "Every 6 hours"
         case .every12Hours: return "Every 12 hours"
-        case .daily: return "Every day"
+        case .daily: return "Every night"
         }
     }
 }
@@ -81,6 +81,20 @@ final class AppModel: ObservableObject {
     }
     @Published var schedule: ScheduleInterval = ScheduleInterval(rawValue: UserDefaults.standard.integer(forKey: "schedule")) ?? .off {
         didSet { defaults.set(schedule.rawValue, forKey: "schedule"); reschedule() }
+    }
+    /// The hour a nightly sync starts, 0 to 23.
+    @Published var scheduleHour: Int = UserDefaults.standard.object(forKey: "scheduleHour") as? Int ?? 2 {
+        didSet { defaults.set(scheduleHour, forKey: "scheduleHour"); reschedule() }
+    }
+    /// Ask before a run you start removes photos from iCloud. Scheduled runs never ask.
+    @Published var askBeforeRemoving: Bool = UserDefaults.standard.object(forKey: "askBeforeRemoving") as? Bool ?? true {
+        didSet { defaults.set(askBeforeRemoving, forKey: "askBeforeRemoving") }
+    }
+    /// The easy setup has been answered (or this Mac ran a download before it existed). Until then
+    /// Home offers Get Started.
+    @Published var hasOnboarded: Bool = UserDefaults.standard.object(forKey: "hasOnboarded") as? Bool
+        ?? (UserDefaults.standard.object(forKey: "lastRun") != nil) {
+        didSet { defaults.set(hasOnboarded, forKey: "hasOnboarded") }
     }
     @Published var showInMenuBar: Bool = UserDefaults.standard.object(forKey: "showInMenuBar") as? Bool ?? true {
         didSet { defaults.set(showInMenuBar, forKey: "showInMenuBar") }
@@ -280,8 +294,6 @@ final class AppModel: ObservableObject {
         phase = .signedIn
         accountName = account?.fullName
         defaults.set(true, forKey: "wasSignedIn")
-        // Nothing can be downloaded until there is a folder: start with the questions.
-        if directory == nil, page == .library { page = .setup }
         await loadLibraries()
     }
 
@@ -393,7 +405,7 @@ final class AppModel: ObservableObject {
         notice = nil
         var run = config
         run.dryRun = run.dryRun || dryRun
-        if run.deletesFromICloud && !run.dryRun && !confirmed && !scheduled {
+        if run.deletesFromICloud && !run.dryRun && !confirmed && !scheduled && askBeforeRemoving {
             pendingDestructiveRun = true
             return
         }
@@ -591,9 +603,16 @@ final class AppModel: ObservableObject {
         scheduleTimer?.invalidate()
         scheduleTimer = nil
         guard schedule != .off else { nextRun = nil; return }
-        let base = lastRun ?? Date()
-        var next = base.addingTimeInterval(TimeInterval(schedule.rawValue))
-        if next < Date().addingTimeInterval(60) { next = Date().addingTimeInterval(60) }
+        let soonest = Date().addingTimeInterval(60)
+        var next: Date
+        if schedule == .daily {
+            // Nightly: the next time the clock reaches the chosen hour.
+            next = Calendar.current.nextDate(after: soonest, matching: DateComponents(hour: scheduleHour, minute: 0),
+                                             matchingPolicy: .nextTime) ?? soonest.addingTimeInterval(86_400)
+        } else {
+            next = (lastRun ?? Date()).addingTimeInterval(TimeInterval(schedule.rawValue))
+            if next < soonest { next = soonest }
+        }
         nextRun = next
         let timer = Timer(fire: next, interval: 0, repeats: false) { [weak self] _ in
             Task { @MainActor in self?.scheduledRunFired() }

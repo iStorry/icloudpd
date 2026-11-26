@@ -83,7 +83,6 @@ struct AppSidebar: View {
             VStack(spacing: 2) {
                 item("Home", "house", .library)
                 item("Activity", "waveform.path.ecg", .activity, busy: model.isDownloading)
-                item("Setup", "checklist", .setup)
                 item("Settings", "slider.horizontal.3", .settings)
             }
 
@@ -777,6 +776,102 @@ struct IncludeChip: View {
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(isOn ? .isSelected : [])
+    }
+}
+// MARK: First launch
+
+/// Home before the easy setup has been answered: what the app is for, and Get Started.
+struct WelcomeStage: View {
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        VStack(spacing: 10) {
+            ZStack(alignment: .bottomLeading) {
+                PhotoWall(photos: model.glance?.photos ?? [])
+                LinearGradient(stops: [.init(color: Theme.background.opacity(0.25), location: 0),
+                                       .init(color: Theme.background.opacity(0.45), location: 0.4),
+                                       .init(color: Theme.background.opacity(0.9), location: 0.75),
+                                       .init(color: Theme.background.opacity(0.98), location: 1)],
+                               startPoint: .top, endPoint: .bottom)
+                VStack(alignment: .leading, spacing: 14) {
+                    Label("iCloud storage almost full?", systemImage: "icloud")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Color(red: 0.66, green: 0.8, blue: 1))
+                        .padding(.horizontal, 12)
+                        .frame(height: 28)
+                        .background(Theme.accent.opacity(0.2), in: .capsule)
+                        .overlay(Capsule().strokeBorder(Theme.accentSoft.opacity(0.35)))
+                    Text("Free up iCloud,\nkeep every photo.")
+                        .font(.system(size: 44, weight: .bold))
+                        .tracking(-1.5)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("Move your photos to this Mac in full quality, then clear them from iCloud. Three quick questions and the download starts.")
+                        .font(.system(size: 15))
+                        .foregroundStyle(Color(white: 0.78))
+                        .lineSpacing(3)
+                        .frame(maxWidth: 540, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack(spacing: 18) {
+                        Button { model.page = .setup } label: {
+                            HStack(spacing: 8) {
+                                Text("Get Started")
+                                Image(systemName: "arrow.right").font(.system(size: 13, weight: .semibold))
+                            }
+                        }
+                        .buttonStyle(HeroButtonStyle(height: 50))
+                        .keyboardShortcut(.defaultAction)
+                        Button("Set it up myself in Settings") {
+                            // Choosing Settings over the questions: Home goes back to normal.
+                            model.hasOnboarded = true
+                            model.page = .settings
+                        }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(Theme.accentSoft)
+                    }
+                    .padding(.top, 6)
+                }
+                .padding(36)
+            }
+            .frame(minHeight: 320, maxHeight: .infinity)
+            .clipShape(.rect(cornerRadius: 20, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(Color.white.opacity(0.06)))
+
+            HStack(alignment: .top, spacing: 10) {
+                HowItWorks(number: 1, title: "Download", text: "Originals, from the dates you pick, into a folder on this Mac.")
+                HowItWorks(number: 2, title: "Check", text: "Each photo is removed from iCloud only once its file is safely here.")
+                HowItWorks(number: 3, title: "Free up space", text: "They go to Recently Deleted, which Apple keeps for 30 days.")
+            }
+            .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+/// One of the three steps under the first-launch photo wall.
+struct HowItWorks: View {
+    let number: Int
+    let title: String
+    let text: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 14) {
+            Text("\(number)")
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(Theme.accentSoft)
+                .frame(width: 28, height: 28)
+                .background(Theme.accent.opacity(0.2), in: .circle)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(.system(size: 14, weight: .semibold))
+                Text(text)
+                    .foregroundStyle(Theme.secondary)
+                    .lineSpacing(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .panel(cornerRadius: 18, fill: Color.white.opacity(0.035), stroke: Color.white.opacity(0.07))
+        .accessibilityElement(children: .combine)
     }
 }
 #endif

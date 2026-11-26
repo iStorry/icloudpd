@@ -47,7 +47,7 @@ enum Initials {
 struct DownloadView: View {
     @EnvironmentObject var model: AppModel
     @State private var showingAlbums = false
-    @State private var settingsPane: SettingsPane = .general
+    @State private var settingsPane: SettingsPane = .freeUp
 
     var body: some View {
         HStack(spacing: WindowButtons.margin) {
@@ -59,14 +59,20 @@ struct DownloadView: View {
             } else if model.page == .settings {
                 SettingsSidebar(pane: $settingsPane)
                     .transition(.opacity)
-                SettingsStage(pane: settingsPane)
+                SettingsStage(pane: $settingsPane)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .transition(.opacity)
             } else {
                 AppSidebar()
                     .transition(.opacity)
                 Group {
-                    if model.page == .activity { activityStage } else { HomeStage(showingAlbums: $showingAlbums) }
+                    if model.page == .activity {
+                        activityStage
+                    } else if !model.hasOnboarded {
+                        WelcomeStage()
+                    } else {
+                        HomeStage(showingAlbums: $showingAlbums)
+                    }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .transition(.opacity)

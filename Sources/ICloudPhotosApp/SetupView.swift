@@ -2,443 +2,758 @@
 import ICloudKit
 import SwiftUI
 
-/// The questions the guided setup asks, in order: the few choices that matter for a download.
+/// The easy setup's steps, in order: three questions, then a review.
 enum SetupStep: Int, CaseIterable, Identifiable {
-    case folder, photoSize, livePhotoSize, videoSize, folders, keep, log
+    case goal, photos, folder, review
 
     var id: Int { rawValue }
 
-    /// The short name in the sidebar.
     var name: String {
         switch self {
-        case .folder: return "Folder"
-        case .photoSize: return "Photo size"
-        case .livePhotoSize: return "Live Photo size"
-        case .videoSize: return "Video size"
-        case .folders: return "Folder layout"
-        case .keep: return "Keep in iCloud"
-        case .log: return "Activity detail"
-        }
-    }
-
-    var question: String {
-        switch self {
-        case .folder: return "Where should your photos go?"
-        case .photoSize: return "What size should photos be?"
-        case .livePhotoSize: return "What about Live Photos?"
-        case .videoSize: return "What size should videos be?"
-        case .folders: return "How should the folders be laid out?"
-        case .keep: return "Should photos stay in iCloud?"
-        case .log: return "How much should the activity list show?"
-        }
-    }
-
-    var explanation: String {
-        switch self {
-        case .folder:
-            return "Pick a folder on this Mac or an external drive. Photos that are already in it are skipped, so you can use a folder from an earlier download."
-        case .photoSize:
-            return "iCloud keeps each photo in a few sizes. Smaller ones save disk space but lose detail."
-        case .livePhotoSize:
-            return "A Live Photo is a photo with a few seconds of video attached. This is about that video; the photo itself follows the photo size."
-        case .videoSize:
-            return "Videos are by far the biggest files in most libraries."
-        case .folders:
-            return "Photos are sorted into folders by the date they were taken."
-        case .keep:
-            return "This decides whether the download is a backup, or a way to free up iCloud storage."
-        case .log:
-            return "The activity list is the running log you see while a download is going."
+        case .goal: return "Goal"
+        case .photos: return "Which photos"
+        case .folder: return "Where to save"
+        case .review: return "Review and start"
         }
     }
 }
 
-/// The guided setup: its steps and answers in the sidebar, one question beside it.
+/// The easy setup: three questions, then the download starts. Nothing is saved until Start or Preview.
 struct SetupFlow: View {
     @EnvironmentObject var model: AppModel
-    @State private var step: SetupStep = .folder
+    @State private var step: SetupStep = .goal
+    /// The furthest step reached: the steps up to it can be revisited from the sidebar.
+    @State private var furthest: SetupStep = .goal
+    @State private var answers = SetupAnswers(config: SyncConfiguration(directoryPath: ""), schedule: .off, isFirstTime: true)
+    @State private var loaded = false
+    @State private var understood = false
+    @State private var showsOptions = false
 
     var body: some View {
         HStack(spacing: WindowButtons.margin) {
             sidebar
             stage.frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .onAppear {
+            guard !loaded else { return }
+            answers = SetupAnswers(config: model.config, schedule: model.schedule, isFirstTime: !model.hasOnboarded)
+            loaded = true
+        }
     }
 
     // MARK: Sidebar
 
     private var sidebar: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack(spacing: 10) {
-                Button { model.page = .library } label: { CircleIcon(systemName: "chevron.left") }
-                    .buttonStyle(.plain)
-                    .keyboardShortcut(.cancelAction)
-                    .help("Back")
-                    .accessibilityLabel("Back")
-                Text("Setup")
+        VStack(alignment: .leading, spacing: 22) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Get started")
                     .font(.system(size: 20, weight: .semibold))
                     .tracking(-0.3)
+                Text("Three questions, then you start")
+                    .foregroundStyle(Theme.secondary)
             }
-            .padding(.leading, 4)
+            .padding(.horizontal, 4)
 
             VStack(spacing: 2) {
-                ForEach(SetupStep.allCases) { item in
-                    let isOn = step == item
-                    Button { step = item } label: {
-                        HStack(spacing: 10) {
-                            Text("\(item.rawValue + 1)")
-                                .font(.system(size: 11, weight: .semibold))
-                                .monospacedDigit()
-                                .frame(width: 22, height: 22)
-                                .background(isOn ? Theme.accent : Color.white.opacity(0.1), in: .circle)
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(item.name)
-                                    .font(.system(size: 14, weight: isOn ? .semibold : .regular))
-                                Text(answer(item))
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(Theme.secondary)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                            }
-                            Spacer(minLength: 0)
-                        }
-                        .padding(.horizontal, 10)
-                        .frame(height: 48)
-                        .background(isOn ? Theme.accent.opacity(0.22) : Color.clear, in: .rect(cornerRadius: 11, style: .continuous))
-                        .contentShape(.rect)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityAddTraits(isOn ? .isSelected : [])
-                }
+                ForEach(SetupStep.allCases) { item in stepRow(item) }
             }
 
             Spacer(minLength: 0)
 
-            Button { model.page = .settings } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: "slider.horizontal.3")
-                    Text("All settings")
-                    Spacer(minLength: 0)
-                    Image(systemName: "chevron.right").font(.system(size: 11, weight: .semibold))
-                }
-                .font(.system(size: 13))
+            Button("Cancel") { model.page = .library }
+                .buttonStyle(.plain)
                 .foregroundStyle(Theme.secondary)
-                .padding(.horizontal, 12)
-                .frame(height: 38)
-                .contentShape(.rect)
-            }
-            .buttonStyle(.plain)
-            .help("Every option, for when the questions here aren't enough")
+                .keyboardShortcut(.cancelAction)
+                .padding(.horizontal, 10)
         }
-        .sidebarColumn(width: 300)
-        .disabled(model.isDownloading)
+        .sidebarColumn(width: 264)
     }
 
-    /// The current answer to a step, for the sidebar.
-    private func answer(_ step: SetupStep) -> String {
-        let c = model.config
-        switch step {
-        case .folder:
-            return model.directory.map { ($0.path as NSString).abbreviatingWithTildeInPath } ?? "Not chosen yet"
-        case .photoSize:
-            return c.sizes.count == 1 ? c.sizes[0].shortLabel : "\(c.sizes.count) sizes"
-        case .livePhotoSize:
-            return c.skipLivePhotos ? "Photo only" : c.livePhotoSize.shortLabel
-        case .videoSize:
-            if c.skipVideos { return "Not downloaded" }
-            return c.videoSize?.shortLabel ?? "Same as photos"
-        case .folders:
-            return FolderStructure(rawValue: c.folderStructure)?.label ?? "Custom"
-        case .keep:
-            if let days = c.keepICloudRecentDays { return "Last \(days) days only" }
-            return "Everything stays"
-        case .log:
-            return model.logLevel.label
-        }
-    }
-
-    // MARK: The question
-
-    private var stage: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("STEP \(step.rawValue + 1) OF \(SetupStep.allCases.count)")
-                            .font(.system(size: 11, weight: .semibold))
-                            .tracking(0.6)
-                            .foregroundStyle(Theme.accentSoft)
-                        Text(step.question)
-                            .font(.system(size: 30, weight: .semibold))
-                            .tracking(-0.7)
-                            .fixedSize(horizontal: false, vertical: true)
-                        Text(step.explanation)
-                            .font(.system(size: 14))
-                            .foregroundStyle(Theme.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    VStack(alignment: .leading, spacing: 8) { options }
-                }
-                .frame(maxWidth: 580, alignment: .leading)
-                .padding(.horizontal, 20)
-                .padding(.top, 30)
-                .padding(.bottom, 16)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .scrollIndicators(.never)
-            .disabled(model.isDownloading)
-
+    private func stepRow(_ item: SetupStep) -> some View {
+        let isCurrent = item == step
+        let isDone = item.rawValue < furthest.rawValue && !isCurrent
+        return Button { step = item } label: {
             HStack(spacing: 12) {
-                if let previous = SetupStep(rawValue: step.rawValue - 1) {
-                    Button { step = previous } label: { Text("Back").frame(width: 70) }
-                        .buttonStyle(PillButtonStyle(kind: .secondary, height: 44))
+                ZStack {
+                    if isCurrent {
+                        Circle().fill(Theme.accent)
+                        Text("\(item.rawValue + 1)").font(.system(size: 11, weight: .bold))
+                    } else if isDone {
+                        Circle().fill(Color(red: 0.2, green: 0.78, blue: 0.44).opacity(0.2))
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(Color(red: 0.5, green: 0.89, blue: 0.66))
+                    } else {
+                        Circle().strokeBorder(Color.white.opacity(0.18))
+                        Text("\(item.rawValue + 1)").font(.system(size: 11, weight: .bold)).foregroundStyle(Theme.secondary)
+                    }
+                }
+                .frame(width: 24, height: 24)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(item.name)
+                        .font(.system(size: 14, weight: isCurrent ? .semibold : .regular))
+                        .foregroundStyle(isCurrent || isDone ? Color.primary : Color(white: 0.8))
+                    Text(answer(item))
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                 }
                 Spacer(minLength: 0)
-                if let next = SetupStep(rawValue: step.rawValue + 1) {
-                    Button { step = next } label: { Text("Continue").frame(width: 90) }
-                        .buttonStyle(PillButtonStyle(height: 44))
-                        .keyboardShortcut(.defaultAction)
-                        .disabled(step == .folder && model.directory == nil)
-                } else {
-                    Button { model.page = .library } label: { Text("Done").frame(width: 90) }
-                        .buttonStyle(PillButtonStyle(height: 44))
-                        .keyboardShortcut(.defaultAction)
-                }
             }
-            .frame(maxWidth: 580)
-            .padding(.horizontal, 20)
-            .padding(.vertical, 14)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(isCurrent ? Theme.accent.opacity(0.18) : Color.clear, in: .rect(cornerRadius: 12, style: .continuous))
+            .contentShape(.rect)
         }
+        .buttonStyle(.plain)
+        .disabled(item.rawValue > furthest.rawValue)
+        .accessibilityAddTraits(isCurrent ? .isSelected : [])
+    }
+
+    private func answer(_ item: SetupStep) -> String {
+        if item.rawValue > furthest.rawValue { return item == .review ? "Nothing runs until you start" : "Not answered yet" }
+        switch item {
+        case .goal: return answers.goal == .freeUp ? "Free up iCloud space" : "Back up only"
+        case .photos:
+            if case .between = answers.photos { return answers.photosSummary }
+            return SetupAnswers.title(answers.photos)
+        case .folder: return answers.directoryPath.isEmpty ? "Not chosen yet" : folderName
+        case .review: return "Nothing runs until you start"
+        }
+    }
+
+    private var folderName: String { (answers.directoryPath as NSString).lastPathComponent }
+
+    // MARK: Stage
+
+    private var stage: some View {
+        VStack(spacing: 0) {
+            GeometryReader { geo in
+                Capsule().fill(Color.white.opacity(0.07))
+                    .overlay(alignment: .leading) {
+                        Capsule().fill(Theme.accent).frame(width: geo.size.width * CGFloat(step.rawValue + 1) / 4)
+                    }
+            }
+            .frame(height: 4)
+            .frame(maxWidth: 680)
+            .padding(.top, 18)
+            .animation(.smooth(duration: 0.3), value: step)
+            .accessibilityHidden(true)
+
+            GeometryReader { geo in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 24) {
+                        heading
+                        content
+                    }
+                    .frame(maxWidth: 680, alignment: .leading)
+                    .padding(.vertical, 28)
+                    .frame(maxWidth: .infinity, minHeight: geo.size.height)
+                }
+                .scrollIndicators(.never)
+            }
+            .id(step)
+            .transition(.opacity)
+
+            footer
+        }
+        .padding(.horizontal, 24)
         .animation(.smooth(duration: 0.2), value: step)
     }
 
-    @ViewBuilder private var options: some View {
-        switch step {
-        case .folder: folderOptions
-        case .photoSize: photoSizeOptions
-        case .livePhotoSize: livePhotoOptions
-        case .videoSize: videoOptions
-        case .folders: folderLayoutOptions
-        case .keep: keepOptions
-        case .log: logOptions
-        }
-    }
-
-    private var folderOptions: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "folder.fill")
-                .font(.system(size: 20))
+    private var heading: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(step == .review ? "Review" : "Question \(step.rawValue + 1) of 3")
+                .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(Theme.accentSoft)
-            Text(model.directory.map { ($0.path as NSString).abbreviatingWithTildeInPath } ?? "No folder chosen yet")
-                .font(.system(size: 15, weight: .medium))
-                .foregroundStyle(model.directory == nil ? Theme.secondary : Color.primary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-            Spacer(minLength: 8)
-            Button(model.directory == nil ? "Choose Folder…" : "Change…") { model.chooseDirectory() }
-                .buttonStyle(PillButtonStyle(kind: model.directory == nil ? .primary : .secondary, height: 32))
-                .fixedSize()
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .panel(cornerRadius: 14)
-    }
-
-    @ViewBuilder private var photoSizeOptions: some View {
-        let sizes = model.config.sizes
-        SetupOption(title: "Original", detail: "The full-quality file, exactly as it was taken. The biggest files, and the right choice for a backup.",
-                    isOn: sizes == [.original]) { model.config.sizes = [.original] }
-        SetupOption(title: "Edited", detail: "With the edits you made in Photos applied, such as crops and filters. Photos you never edited come as the original.",
-                    isOn: sizes == [.adjusted]) { model.config.sizes = [.adjusted] }
-        SetupOption(title: "Medium", detail: "A smaller copy that iCloud makes. Fine for looking at on a screen, and takes much less space.",
-                    isOn: sizes == [.medium]) { model.config.sizes = [.medium] }
-        SetupOption(title: "Thumbnail", detail: "A tiny preview. Only useful as an index of what is in your library.",
-                    isOn: sizes == [.thumb]) { model.config.sizes = [.thumb] }
-        if sizes.count > 1 || sizes == [.alternative] {
-            SetupNote(text: "All settings has a different choice here: \(sizes.map(\.shortLabel).joined(separator: ", ")). Picking one above replaces it.")
+            Text(title)
+                .font(.system(size: 34, weight: .bold))
+                .tracking(-1)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(explanation)
+                .font(.system(size: 15))
+                .foregroundStyle(Theme.secondary)
+                .lineSpacing(3)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
-    @ViewBuilder private var livePhotoOptions: some View {
-        let c = model.config
-        SetupOption(title: "Original", detail: "The video as it was recorded, saved next to the photo.",
-                    isOn: !c.skipLivePhotos && c.livePhotoSize == .original) { chooseLive(.original) }
-        SetupOption(title: "Medium", detail: "A smaller copy of the video.",
-                    isOn: !c.skipLivePhotos && c.livePhotoSize == .medium) { chooseLive(.medium) }
-        SetupOption(title: "Thumbnail", detail: "A very small copy of the video.",
-                    isOn: !c.skipLivePhotos && c.livePhotoSize == .thumb) { chooseLive(.thumb) }
-        SetupOption(title: "Photo only", detail: "Skip the video and keep just the still photo.",
-                    isOn: c.skipLivePhotos) { model.config.skipLivePhotos = true }
-    }
-
-    private func chooseLive(_ size: LivePhotoSize) {
-        model.config.skipLivePhotos = false
-        model.config.livePhotoSize = size
-    }
-
-    private func chooseVideo(_ size: PhotoSize) {
-        model.config.skipVideos = false
-        model.config.videoSize = size
-    }
-
-    @ViewBuilder private var videoOptions: some View {
-        let c = model.config
-        SetupOption(title: "Original", detail: "Full quality, as recorded. A minute of 4K video can be several hundred megabytes.",
-                    isOn: !c.skipVideos && (c.videoSize == .original || (c.videoSize == nil && c.sizes == [.original]))) { chooseVideo(.original) }
-        SetupOption(title: "Medium", detail: "A smaller copy that iCloud makes. Good enough to watch, and much lighter.",
-                    isOn: !c.skipVideos && c.videoSize == .medium) { chooseVideo(.medium) }
-        SetupOption(title: "Thumbnail", detail: "A very small, low-quality copy.",
-                    isOn: !c.skipVideos && c.videoSize == .thumb) { chooseVideo(.thumb) }
-        SetupOption(title: "Don't download videos", detail: "Photos only. Videos stay in iCloud and are left alone.",
-                    isOn: c.skipVideos) { model.config.skipVideos = true }
-        if !c.skipVideos, c.videoSize == nil, c.sizes != [.original] {
-            SetupNote(text: "Videos currently follow the photo size (\(c.sizes.map(\.shortLabel).joined(separator: ", "))). Pick one above to give them their own.")
+    private var title: String {
+        switch step {
+        case .goal: return "What would you like to do?"
+        case .photos: return answers.goal == .freeUp ? "Which photos should move off iCloud?" : "Which photos should be downloaded?"
+        case .folder: return "Where should they go?"
+        case .review: return answers.goal == .freeUp ? "Ready to free up iCloud" : "Ready to back up"
         }
     }
 
-    @ViewBuilder private var folderLayoutOptions: some View {
-        let current = model.config.folderStructure
-        ForEach(FolderStructure.allCases, id: \.self) { layout in
-            SetupOption(title: layout.label, detail: example(layout.rawValue), isOn: current == layout.rawValue, monospacedDetail: true) {
-                model.config.folderStructure = layout.rawValue
-            }
-        }
-        if FolderStructure(rawValue: current) == nil {
-            SetupOption(title: "Custom", detail: example(current), isOn: true, monospacedDetail: true) {}
-            SetupNote(text: "A custom layout is set in All settings. Picking one above replaces it.")
+    private var explanation: String {
+        switch step {
+        case .goal: return "You can change this later in Settings."
+        case .photos:
+            return answers.goal == .freeUp
+                ? "Pick by the date they were taken. Anything newer stays in iCloud, so your iPhone keeps your recent photos."
+                : "Pick by the date they were taken."
+        case .folder: return "This folder becomes the home of these photos. An external drive works too. Photos already in it are skipped."
+        case .review: return "\(answers.photosSummary). Nothing has been downloaded or removed yet."
         }
     }
 
-    /// Where a photo taken today would land with this layout.
-    private func example(_ format: String) -> String {
-        let folder = (try? FolderFormat(format))?.path(for: Date()) ?? ""
-        return (folder.isEmpty ? "" : folder + "/") + "IMG_0001.HEIC"
+    @ViewBuilder private var content: some View {
+        switch step {
+        case .goal: goalChoices
+        case .photos: photosChoices
+        case .folder: folderChoice
+        case .review: review
+        }
     }
 
-    @ViewBuilder private var keepOptions: some View {
-        let days = model.config.keepICloudRecentDays
-        SetupOption(title: "Keep everything in iCloud",
-                    detail: "Nothing is ever removed from iCloud. The folder on this Mac is a second copy.",
-                    isOn: days == nil) { model.config.keepICloudRecentDays = nil }
-        SetupOption(title: "Only keep recent photos in iCloud",
-                    detail: "Once a photo is safely on this Mac and older than the number of days you set, it is moved to Recently Deleted in iCloud, which holds it for 30 more days. This frees iCloud storage, and the copy on this Mac becomes the only one.",
-                    isOn: days != nil, isRisky: true) {
-            if days == nil { model.config.keepICloudRecentDays = 30 }
-        }
-        if days != nil {
-            HStack(spacing: 10) {
-                Text("Keep the last")
-                FieldWell(width: 80) {
-                    TextField("Days", text: Binding(
-                        get: { String(model.config.keepICloudRecentDays ?? 0) },
-                        set: { text in
-                            model.config.keepICloudRecentDays = min(Int(text.filter(\.isNumber)) ?? 0, 3650)
-                        }))
+    // MARK: 1 · Goal
+
+    private var goalChoices: some View {
+        HStack(alignment: .top, spacing: 12) { goalCards }
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    @ViewBuilder private var goalCards: some View {
+        GoalCard(symbol: "icloud.slash", title: "Free up iCloud space", isRecommended: true,
+                 text: "Download the photos you pick, then remove them from iCloud. This Mac keeps the full-quality copy.",
+                 points: ["Room in iCloud again, maybe a smaller plan", "Removed only after each file is safely saved"],
+                 isOn: answers.goal == .freeUp) { choose(.freeUp) }
+        GoalCard(symbol: "macbook.and.iphone", title: "Back up only", isRecommended: false,
+                 text: "Download a copy to this Mac and leave iCloud exactly as it is.",
+                 points: ["Nothing is ever removed from iCloud", "Doesn't free any iCloud storage"],
+                 isOn: answers.goal == .backUp) { choose(.backUp) }
+    }
+
+    private func choose(_ goal: SetupAnswers.Goal) {
+        answers.goal = goal
+        // "Older than" only means something when photos leave iCloud.
+        if goal == .backUp, case .olderThan = answers.photos { answers.photos = .everything }
+    }
+
+    // MARK: 2 · Which photos
+
+    private var photosChoices: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 10)], spacing: 10) {
+                ForEach(answers.presets, id: \.self) { preset in
+                    PresetCard(title: SetupAnswers.title(preset), detail: answers.detail(preset), isOn: answers.photos == preset) {
+                        answers.photos = preset
+                    }
                 }
-                Text((model.config.keepICloudRecentDays ?? 0) == 1 ? "day in iCloud" : "days in iCloud")
-                Spacer(minLength: 0)
             }
-            .padding(14)
+            VStack(alignment: .leading, spacing: 16) {
+                if answers.photos == .between {
+                    HStack(spacing: 12) {
+                        dateField("From", $answers.from)
+                        dateField("To", $answers.to)
+                    }
+                }
+                RangeBar(answers: answers)
+            }
+            .padding(20)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .panel(cornerRadius: 14)
-            SetupNote(text: "The app asks before every download you start that will delete from iCloud. Downloads that run on a schedule don't ask.", isWarning: true)
+            .panel(cornerRadius: 18, fill: Color.white.opacity(0.035), stroke: Color.white.opacity(0.07))
         }
     }
 
-    @ViewBuilder private var logOptions: some View {
-        SetupOption(title: "Normal", detail: "Each file as it is downloaded, and any problem.",
-                    isOn: model.logLevel == .info || model.logLevel == .warning) { model.logLevel = .info }
-        SetupOption(title: "Detailed", detail: "Also every file that was already saved, and what the app is doing behind the scenes. Useful when something goes wrong.",
-                    isOn: model.logLevel == .debug) { model.logLevel = .debug }
-        SetupOption(title: "Problems only", detail: "Nothing unless a file fails or something needs your attention.",
-                    isOn: model.logLevel == .error) { model.logLevel = .error }
+    private func dateField(_ title: String, _ date: Binding<Date>) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(.system(size: 12, weight: .medium)).foregroundStyle(Theme.secondary)
+            DatePicker(title, selection: date, in: ...Date(), displayedComponents: .date)
+                .labelsHidden()
+                .datePickerStyle(.compact)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    // MARK: 3 · Where to save
+
+    private var folderChoice: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 18) {
+                HStack(spacing: 14) {
+                    Image(systemName: "folder.fill")
+                        .font(.system(size: 22))
+                        .foregroundStyle(Theme.accentSoft)
+                        .frame(width: 52, height: 52)
+                        .background(Theme.accent.opacity(0.18), in: .rect(cornerRadius: 15, style: .continuous))
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(answers.directoryPath.isEmpty ? "No folder chosen yet" : folderName)
+                            .font(.system(size: 16, weight: .semibold))
+                        Text(answers.directoryPath.isEmpty ? "Pick one on this Mac or an external drive"
+                             : (answers.directoryPath as NSString).abbreviatingWithTildeInPath)
+                            .foregroundStyle(Theme.secondary)
+                            .truncationMode(.middle)
+                    }
+                    .lineLimit(1)
+                    Spacer(minLength: 8)
+                    Button(answers.directoryPath.isEmpty ? "Choose Folder…" : "Change…") {
+                        if let url = model.pickFolder(message: "Choose where to save your iCloud photos") {
+                            answers.directoryPath = url.path
+                        }
+                    }
+                    .buttonStyle(PillButtonStyle(kind: answers.directoryPath.isEmpty ? .primary : .secondary, height: 34))
+                    .fixedSize()
+                }
+                if let space = DiskSpace.of(answers.directoryPath) {
+                    DiskBar(space: space)
+                }
+            }
+            .padding(22)
+            .panel(cornerRadius: 18, fill: Color.white.opacity(0.035), stroke: Color.white.opacity(0.07))
+
+            VStack(alignment: .leading, spacing: 0) {
+                Button { showsOptions.toggle() } label: {
+                    HStack {
+                        Text("Quality and folders").font(.system(size: 13, weight: .medium))
+                        Spacer()
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 11, weight: .semibold))
+                            .rotationEffect(.degrees(showsOptions ? 0 : -90))
+                    }
+                    .foregroundStyle(Color(white: 0.8))
+                    .padding(.horizontal, 18)
+                    .frame(height: 46)
+                    .contentShape(.rect)
+                }
+                .buttonStyle(.plain)
+                if showsOptions {
+                    VStack(spacing: 0) {
+                        CardDivider()
+                        OptionRow(title: "Quality", detail: "Originals are the full files, exactly as taken") {
+                            Picker("Quality", selection: $answers.size) {
+                                ForEach([PhotoSize.original, .adjusted, .medium], id: \.self) { Text($0.qualityLabel).tag($0) }
+                            }
+                        }
+                        CardDivider()
+                        OptionRow(title: "Folders", detail: FolderExample.path(for: answers.folderStructure), monospaced: true) {
+                            Picker("Folders", selection: $answers.folderStructure) {
+                                ForEach(FolderStructure.allCases, id: \.self) { Text($0.label).tag($0.rawValue) }
+                                if FolderStructure(rawValue: answers.folderStructure) == nil {
+                                    Text("Custom").tag(answers.folderStructure)
+                                }
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 18)
+                    .padding(.bottom, 6)
+                }
+            }
+            .panel(cornerRadius: 16, fill: Color.white.opacity(0.02), stroke: Color.white.opacity(0.07))
+            .animation(.smooth(duration: 0.2), value: showsOptions)
+        }
+    }
+
+    // MARK: 4 · Review
+
+    private var review: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Card {
+                SummaryRow(symbol: "calendar", tint: Color(white: 0.9), title: "Photos", value: answers.photosSummary) { step = .photos }
+                SummaryRow(symbol: "folder.fill", tint: Theme.accentSoft, title: "Saved to",
+                           value: (answers.directoryPath as NSString).abbreviatingWithTildeInPath, detail: savedToDetail) { step = .folder }
+                SummaryRow(symbol: answers.goal == .freeUp ? "icloud.slash" : "icloud",
+                           tint: answers.goal == .freeUp ? Theme.warning : Color(white: 0.9),
+                           title: "Then", value: thenText) { step = .goal }
+            }
+
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Keep it going").font(.system(size: 14))
+                    Text(keepGoingText).font(.system(size: 12)).foregroundStyle(Theme.secondary)
+                }
+                Spacer(minLength: 8)
+                Toggle("Keep it going", isOn: $answers.keepGoing).labelsHidden().toggleStyle(.switch)
+            }
+            .padding(.horizontal, 4)
+
+            if answers.goal == .freeUp {
+                Toggle(isOn: $understood) {
+                    Text("I understand these photos will leave iCloud and all my devices. They wait in Recently Deleted for 30 days, then the copy on this Mac is the only one.")
+                        .foregroundStyle(Color(red: 0.95, green: 0.85, blue: 0.74))
+                        .lineSpacing(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .toggleStyle(.checkbox)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .panel(cornerRadius: 14, fill: Theme.warning.opacity(0.07), stroke: Theme.warning.opacity(0.3))
+            }
+
+            if model.phase != .signedIn {
+                Label("Connecting to iCloud…", systemImage: "icloud")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.secondary)
+            }
+        }
+    }
+
+    private var savedToDetail: String {
+        let folders = FolderStructure(rawValue: answers.folderStructure)?.label ?? "Custom folders"
+        return "\(answers.size.qualityLabel), in folders by \(folders.lowercased())"
+    }
+
+    private var thenText: String {
+        guard answers.goal == .freeUp else { return "iCloud stays as it is" }
+        if case .olderThan = answers.photos {
+            return "Removed from iCloud once saved here. Newer photos are saved too, and stay in iCloud."
+        }
+        return "Removed from iCloud once each file is saved here"
+    }
+
+    private var keepGoingText: String {
+        let time = DateComponents(calendar: .current, hour: model.scheduleHour, minute: 0).date?
+            .formatted(date: .omitted, time: .shortened) ?? "\(model.scheduleHour):00"
+        if answers.goal == .freeUp, case .olderThan(let days) = answers.photos {
+            return "Each night at \(time), save new photos and move ones that turn \(RemovalAge.label(days).lowercased()) old"
+        }
+        return "Each night at \(time), save new photos"
+    }
+
+    // MARK: Footer
+
+    private var footer: some View {
+        HStack(spacing: 10) {
+            Button { if let previous = SetupStep(rawValue: step.rawValue - 1) { step = previous } } label: {
+                Text("Back").frame(minWidth: 40)
+            }
+            .buttonStyle(HeroButtonStyle(isPrimary: false))
+            .disabled(step == .goal)
+
+            Spacer(minLength: 0)
+
+            if step == .review {
+                Button { start(preview: true) } label: { Text("Preview First") }
+                    .buttonStyle(HeroButtonStyle(isPrimary: false))
+                    .help("See what would be downloaded and removed, without changing anything")
+                    .disabled(!canStart)
+                Button { start(preview: false) } label: {
+                    Label("Start", systemImage: "arrow.down.to.line")
+                }
+                .buttonStyle(HeroButtonStyle())
+                .keyboardShortcut(.defaultAction)
+                .disabled(!canStart || (answers.goal == .freeUp && !understood))
+            } else {
+                Button(action: next) {
+                    HStack(spacing: 8) {
+                        Text("Continue")
+                        Image(systemName: "arrow.right").font(.system(size: 13, weight: .semibold))
+                    }
+                }
+                .buttonStyle(HeroButtonStyle())
+                .keyboardShortcut(.defaultAction)
+                .disabled(step == .folder && answers.directoryPath.isEmpty)
+            }
+        }
+        .frame(maxWidth: 680)
+        .padding(.bottom, 26)
+    }
+
+    private var canStart: Bool { model.phase == .signedIn && !answers.directoryPath.isEmpty && !model.isDownloading }
+
+    private func next() {
+        guard let following = SetupStep(rawValue: step.rawValue + 1) else { return }
+        step = following
+        if following.rawValue > furthest.rawValue { furthest = following }
+    }
+
+    private func start(preview: Bool) {
+        answers.apply(to: &model.config)
+        model.schedule = answers.keepGoing ? .daily : .off
+        model.hasOnboarded = true
+        if preview {
+            model.startDownload(dryRun: true)
+        } else {
+            // The box above is the confirmation the app would otherwise ask for.
+            model.startDownload(confirmed: true)
+        }
     }
 }
 
-/// One answer to a setup question: a name, what it means in plain words, and whether it is chosen.
-struct SetupOption: View {
+// MARK: Pieces
+
+/// One of the two big answers to "What would you like to do?".
+struct GoalCard: View {
+    let symbol: String
     let title: String
-    let detail: String
+    let isRecommended: Bool
+    let text: String
+    let points: [String]
     let isOn: Bool
-    var isRisky = false
-    var monospacedDetail = false
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            HStack(alignment: .top, spacing: 12) {
-                Image(systemName: isOn ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 18))
-                    .foregroundStyle(isOn ? highlight : Color.white.opacity(0.3))
-                    .padding(.top, 1)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(title).font(.system(size: 15, weight: .medium))
-                    Text(detail)
-                        .font(monospacedDetail ? .system(size: 12, design: .monospaced) : .system(size: 12))
-                        .foregroundStyle(Theme.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 14) {
+                Image(systemName: symbol)
+                    .font(.system(size: 22))
+                    .foregroundStyle(isOn ? Theme.accentSoft : Color(white: 0.9))
+                    .frame(width: 48, height: 48)
+                    .background(isOn ? Theme.accent.opacity(0.22) : Color.white.opacity(0.07), in: .rect(cornerRadius: 14, style: .continuous))
+                HStack(spacing: 8) {
+                    Text(title).font(.system(size: 18, weight: .semibold))
+                    if isRecommended {
+                        Text("Recommended")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Color(red: 0.5, green: 0.89, blue: 0.66))
+                            .padding(.horizontal, 8)
+                            .frame(height: 20)
+                            .background(Color(red: 0.2, green: 0.78, blue: 0.44).opacity(0.16), in: .capsule)
+                    }
                 }
-                Spacer(minLength: 0)
+                Text(text)
+                    .font(.system(size: 14))
+                    .foregroundStyle(Color(white: 0.75))
+                    .lineSpacing(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(points, id: \.self) { point in
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundStyle(isRecommended ? Color(red: 0.5, green: 0.89, blue: 0.66) : Theme.secondary)
+                            Text(point)
+                        }
+                    }
+                }
+                .font(.system(size: 13))
+                .foregroundStyle(Color(white: 0.8))
             }
-            .padding(14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .panel(cornerRadius: 14,
-                   fill: isOn ? highlight.opacity(0.14) : Theme.panelFill,
-                   stroke: isOn ? highlight.opacity(0.6) : Theme.panelStroke)
+            .padding(22)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(isOn ? Theme.accent.opacity(0.1) : Color.white.opacity(0.03), in: .rect(cornerRadius: 18, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(isOn ? Theme.accent : Color.white.opacity(0.1), lineWidth: 1.5))
+            .overlay(alignment: .topTrailing) {
+                if isOn {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 24, height: 24)
+                        .background(Theme.accent, in: .circle)
+                        .padding(18)
+                }
+            }
             .contentShape(.rect)
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(isOn ? .isSelected : [])
     }
-
-    private var highlight: Color { isRisky ? Theme.warning : Theme.accentSoft }
 }
 
-/// A line of small print under the options.
-struct SetupNote: View {
-    let text: String
-    var isWarning = false
+/// A small card for one answer to "Which photos?".
+struct PresetCard: View {
+    let title: String
+    let detail: String
+    let isOn: Bool
+    let action: () -> Void
 
     var body: some View {
-        Label(text, systemImage: isWarning ? "exclamationmark.triangle.fill" : "info.circle")
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(.system(size: 14, weight: .semibold))
+                Text(detail)
+                    .font(.system(size: 12))
+                    .foregroundStyle(isOn ? Color(red: 0.66, green: 0.8, blue: 1) : Theme.secondary)
+            }
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(isOn ? Theme.accent.opacity(0.1) : Color.white.opacity(0.03), in: .rect(cornerRadius: 14, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(isOn ? Theme.accent : Color.white.opacity(0.1), lineWidth: 1.5))
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(isOn ? .isSelected : [])
+    }
+}
+
+/// A bar across time: which photos come to this Mac, which leave iCloud and which stay.
+struct RangeBar: View {
+    let answers: SetupAnswers
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 2) {
+                switch answers.photos {
+                case .olderThan:
+                    segment("Move to this Mac, then off iCloud", isOn: true).layoutPriority(1)
+                    segment("Stays in iCloud", isOn: false).frame(width: 120)
+                case .everything:
+                    segment(answers.goal == .freeUp ? "Move to this Mac, then off iCloud" : "Download a copy to this Mac", isOn: true)
+                case .between:
+                    segment("Left alone", isOn: false).frame(width: 90)
+                    segment(answers.goal == .freeUp ? "Move to this Mac, then off iCloud" : "Download", isOn: true).layoutPriority(1)
+                    segment("Left alone", isOn: false).frame(width: 90)
+                }
+            }
+            .frame(height: 34)
+            .clipShape(.rect(cornerRadius: 10, style: .continuous))
+
+            HStack {
+                Text(leadingLabel)
+                Spacer()
+                Text(trailingLabel)
+            }
+            .font(.system(size: 11))
+            .foregroundStyle(Theme.secondary)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(answers.photosSummary)
+    }
+
+    private func segment(_ text: String, isOn: Bool) -> some View {
+        Text(text)
+            .font(.system(size: 12, weight: isOn ? .semibold : .regular))
+            .foregroundStyle(isOn ? Color.white : Color(white: 0.8))
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
+            .padding(.horizontal, 12)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: isOn ? .leading : .center)
+            .background(isOn ? AnyShapeStyle(LinearGradient(colors: [Color(red: 0.04, green: 0.34, blue: 0.84), Color(red: 0.17, green: 0.48, blue: 1)],
+                                                            startPoint: .leading, endPoint: .trailing))
+                             : AnyShapeStyle(Color.white.opacity(0.1)))
+    }
+
+    private var leadingLabel: String {
+        if case .between = answers.photos { return min(answers.from, answers.to).formatted(date: .abbreviated, time: .omitted) }
+        return "Your first photo"
+    }
+
+    private var trailingLabel: String {
+        switch answers.photos {
+        case .olderThan(let days): return "\(RemovalAge.cutoff(days).formatted(date: .abbreviated, time: .omitted)) · Today"
+        case .everything: return "Today"
+        case .between: return max(answers.from, answers.to).formatted(date: .abbreviated, time: .omitted)
+        }
+    }
+}
+
+/// A row of the review: what was answered, and a way back to change it.
+struct SummaryRow: View {
+    let symbol: String
+    let tint: Color
+    let title: String
+    let value: String
+    var detail: String?
+    let change: () -> Void
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Image(systemName: symbol)
+                .font(.system(size: 15))
+                .foregroundStyle(tint)
+                .frame(width: 36, height: 36)
+                .background(tint.opacity(0.14), in: .rect(cornerRadius: 10, style: .continuous))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.system(size: 12)).foregroundStyle(Theme.secondary)
+                if let detail {
+                    // A path: one line, cut in the middle where it says least.
+                    Text(value)
+                        .font(.system(size: 14, weight: .medium))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text(detail).font(.system(size: 12)).foregroundStyle(Theme.secondary)
+                } else {
+                    Text(value)
+                        .font(.system(size: 14, weight: .medium))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 8)
+            CardLink(title: "Change", action: change)
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 14)
+    }
+}
+
+/// A label with a line under it, and a menu on the right.
+struct OptionRow<Choice: View>: View {
+    let title: String
+    var detail: String?
+    var monospaced = false
+    @ViewBuilder var choice: Choice
+
+    var body: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.system(size: 14))
+                if let detail {
+                    Text(detail)
+                        .font(.system(size: 12, design: monospaced ? .monospaced : .default))
+                        .foregroundStyle(Theme.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 8)
+            choice
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .tint(.white)
+                .fixedSize()
+        }
+        .frame(minHeight: 52)
+    }
+}
+
+/// The disk a folder is on: its name, size and free space.
+struct DiskSpace {
+    var name: String
+    var capacity: Int64
+    var available: Int64
+
+    /// Looks at the folder, or the nearest folder above it that exists.
+    static func of(_ path: String) -> DiskSpace? {
+        guard !path.isEmpty else { return nil }
+        var url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+        while !FileManager.default.fileExists(atPath: url.path), url.path != "/" { url.deleteLastPathComponent() }
+        guard let values = try? url.resourceValues(forKeys: [.volumeLocalizedNameKey, .volumeTotalCapacityKey,
+                                                             .volumeAvailableCapacityForImportantUsageKey]),
+              let capacity = values.volumeTotalCapacity, let available = values.volumeAvailableCapacityForImportantUsage
+        else { return nil }
+        return DiskSpace(name: values.volumeLocalizedName ?? "Disk", capacity: Int64(capacity), available: available)
+    }
+}
+
+/// How full the folder's disk is.
+struct DiskBar: View {
+    let space: DiskSpace
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            GeometryReader { geo in
+                Capsule().fill(Color.white.opacity(0.08))
+                    .overlay(alignment: .leading) {
+                        Capsule().fill(Color.white.opacity(0.3))
+                            .frame(width: geo.size.width * CGFloat(Double(space.capacity - space.available) / Double(max(space.capacity, 1))))
+                    }
+            }
+            .frame(height: 8)
+            HStack {
+                Text("\(space.name) · \(AppSidebar.size(space.capacity))")
+                Spacer()
+                Text("\(AppSidebar.size(space.available)) free")
+            }
             .font(.system(size: 12))
-            .foregroundStyle(isWarning ? Theme.warning : Theme.tertiary)
-            .fixedSize(horizontal: false, vertical: true)
-            .padding(.horizontal, 4)
-            .padding(.top, 2)
+            .foregroundStyle(Theme.secondary)
+        }
+        .accessibilityElement(children: .combine)
     }
 }
 
-extension PhotoSize {
-    var shortLabel: String {
-        switch self {
-        case .original: return "Original"
-        case .adjusted: return "Edited"
-        case .alternative: return "Alternative"
-        case .medium: return "Medium"
-        case .thumb: return "Thumbnail"
-        }
-    }
-}
-
-extension LivePhotoSize {
-    var shortLabel: String {
-        switch self {
-        case .original: return "Original"
-        case .medium: return "Medium"
-        case .thumb: return "Thumbnail"
-        }
-    }
-}
-
-extension SyncLogLevel {
-    var label: String {
-        switch self {
-        case .debug: return "Detailed"
-        case .info, .warning: return "Normal"
-        case .error: return "Problems only"
-        }
+/// Where a photo taken today would land with a folder layout.
+enum FolderExample {
+    static func path(for format: String) -> String {
+        let folder = (try? FolderFormat(format))?.path(for: Date()) ?? ""
+        return (folder.isEmpty ? "" : folder + "/") + "IMG_0001.HEIC"
     }
 }
 #endif
