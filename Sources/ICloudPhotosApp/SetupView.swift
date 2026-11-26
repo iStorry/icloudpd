@@ -129,17 +129,12 @@ struct SetupFlow: View {
 
     private var stage: some View {
         VStack(spacing: 0) {
-            GeometryReader { geo in
-                Capsule().fill(Color.white.opacity(0.07))
-                    .overlay(alignment: .leading) {
-                        Capsule().fill(Theme.accent).frame(width: geo.size.width * CGFloat(step.rawValue + 1) / 4)
-                    }
-            }
-            .frame(height: 4)
-            .frame(maxWidth: 680)
-            .padding(.top, 18)
-            .animation(.smooth(duration: 0.3), value: step)
-            .accessibilityHidden(true)
+            ProgressView(value: Double(step.rawValue + 1), total: Double(SetupStep.allCases.count))
+                .progressViewStyle(CapsuleProgressStyle(height: 4, fill: AnyShapeStyle(Theme.accent), minimumFill: 0))
+                .frame(maxWidth: 680)
+                .padding(.top, 18)
+                .animation(.smooth(duration: 0.3), value: step)
+                .accessibilityLabel("Step \(step.rawValue + 1) of \(SetupStep.allCases.count)")
 
             GeometryReader { geo in
                 ScrollView {
@@ -305,24 +300,7 @@ struct SetupFlow: View {
             .padding(22)
             .panel(cornerRadius: 18, fill: Color.white.opacity(0.035), stroke: Color.white.opacity(0.07))
 
-            VStack(alignment: .leading, spacing: 0) {
-                Button { showsOptions.toggle() } label: {
-                    HStack {
-                        Text("Quality and folders").font(.system(size: 13, weight: .medium))
-                        Spacer()
-                        Image(systemName: "chevron.down")
-                            .font(.system(size: 11, weight: .semibold))
-                            .rotationEffect(.degrees(showsOptions ? 0 : -90))
-                    }
-                    .foregroundStyle(Color(white: 0.8))
-                    .padding(.horizontal, 18)
-                    .frame(height: 46)
-                    .contentShape(.rect)
-                }
-                .buttonStyle(.plain)
-                if showsOptions {
-                    VStack(spacing: 0) {
-                        CardDivider()
+            DisclosureGroup("Quality and folders", isExpanded: $showsOptions) {
                         OptionRow(title: "Quality", detail: "Originals are the full files, exactly as taken") {
                             Picker("Quality", selection: $answers.size) {
                                 ForEach([PhotoSize.original, .adjusted, .medium], id: \.self) { Text($0.qualityLabel).tag($0) }
@@ -337,13 +315,8 @@ struct SetupFlow: View {
                                 }
                             }
                         }
-                    }
-                    .padding(.horizontal, 18)
-                    .padding(.bottom, 6)
-                }
             }
-            .panel(cornerRadius: 16, fill: Color.white.opacity(0.02), stroke: Color.white.opacity(0.07))
-            .animation(.smooth(duration: 0.2), value: showsOptions)
+            .disclosureGroupStyle(CardDisclosureStyle())
         }
     }
 
@@ -729,14 +702,10 @@ struct DiskBar: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            GeometryReader { geo in
-                Capsule().fill(Color.white.opacity(0.08))
-                    .overlay(alignment: .leading) {
-                        Capsule().fill(Color.white.opacity(0.3))
-                            .frame(width: geo.size.width * CGFloat(Double(space.capacity - space.available) / Double(max(space.capacity, 1))))
-                    }
+            Gauge(value: Double(space.capacity - space.available) / Double(max(space.capacity, 1))) {
+                Text(space.name)
             }
-            .frame(height: 8)
+            .gaugeStyle(CapacityBarStyle(height: 8, used: Color.white.opacity(0.3)))
             HStack {
                 Text("\(space.name) · \(AppSidebar.size(space.capacity))")
                 Spacer()

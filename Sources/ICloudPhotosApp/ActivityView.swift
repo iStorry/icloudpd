@@ -13,8 +13,6 @@ struct ActivityStage: View {
     private var isDownload: Bool { model.runKind == .download }
     private var dry: Bool { model.currentDryRun }
     private var running: Bool { model.isDownloading }
-    /// A delete list has no numbers of its own: its details are all there is to show.
-    private var detailsOpen: Bool { showsLog || !isDownload }
 
     var body: some View {
         ScrollView {
@@ -136,19 +134,10 @@ struct ActivityStage: View {
                         .font(.system(size: 14))
                         .foregroundStyle(Theme.secondary)
                 }
-                GeometryReader { geo in
-                    Capsule().fill(Color.white.opacity(0.08))
-                        .overlay(alignment: .leading) {
-                            Capsule()
-                                .fill(LinearGradient(colors: [Color(red: 0.04, green: 0.34, blue: 0.84), Color(red: 0.24, green: 0.55, blue: 1)],
-                                                     startPoint: .leading, endPoint: .trailing))
-                                .frame(width: max(14, geo.size.width * CGFloat(model.runFraction ?? 0.02)))
-                                .animation(.smooth(duration: 0.4), value: model.processed)
-                        }
-                }
-                .frame(height: 14)
-                .accessibilityElement()
-                .accessibilityLabel("Progress")
+                ProgressView(value: model.runFraction ?? 0)
+                    .progressViewStyle(CapsuleProgressStyle())
+                    .animation(.smooth(duration: 0.4), value: model.processed)
+                    .accessibilityLabel("Progress")
                 .accessibilityValue(model.runFraction.map { "\(Int($0 * 100)) percent" } ?? "Starting")
                 Text(lookedAt)
                     .font(.system(size: 13))
@@ -371,30 +360,16 @@ struct ActivityStage: View {
 
     // MARK: Details
 
-    private var details: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if isDownload {
-                Button { withAnimation(.smooth(duration: 0.2)) { showsLog.toggle() } } label: {
-                    HStack(spacing: 6) {
-                        Text(showsLog ? "Hide details" : "Show details")
-                        Image(systemName: "chevron.down")
-                            .font(.system(size: 10, weight: .semibold))
-                            .rotationEffect(.degrees(showsLog ? 0 : -90))
-                    }
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(Theme.secondary)
-                    .padding(.horizontal, 4)
-                    .frame(height: 28)
-                    .contentShape(.rect)
-                }
-                .buttonStyle(.plain)
-                .accessibilityValue(showsLog ? "Shown" : "Hidden")
+    @ViewBuilder private var details: some View {
+        if isDownload {
+            DisclosureGroup(isExpanded: $showsLog) {
+                ActivityList(lines: model.log).frame(height: 280)
+            } label: {
+                Text(showsLog ? "Hide details" : "Show details")
             }
-            if detailsOpen {
-                ActivityList(lines: model.log)
-                    .frame(height: isDownload ? 280 : 420)
-                    .transition(.opacity)
-            }
+            .disclosureGroupStyle(LinkDisclosureStyle())
+        } else {
+            ActivityList(lines: model.log).frame(height: 420)
         }
     }
 }
@@ -475,7 +450,6 @@ struct SavedThumbnail: View {
 /// The run's progress next to Activity in the sidebar: a ring at icon size and the percentage.
 struct RunBadge: View {
     let fraction: Double?
-    @State private var spins = false
 
     var body: some View {
         HStack(spacing: 6) {
@@ -484,21 +458,14 @@ struct RunBadge: View {
                     .font(.system(size: 11, weight: .semibold))
                     .monospacedDigit()
                     .foregroundStyle(Theme.accentSoft)
+                    .accessibilityHidden(true)
+                ProgressView(value: fraction)
+            } else {
+                ProgressView()
             }
-            ZStack {
-                Circle().stroke(Color.white.opacity(0.15), lineWidth: 2)
-                Circle()
-                    .trim(from: 0, to: fraction.map { max(0.03, $0) } ?? 0.3)
-                    .stroke(Theme.accentSoft, style: StrokeStyle(lineWidth: 2, lineCap: .round))
-                    .rotationEffect(.degrees(fraction == nil && spins ? 270 : -90))
-                    .animation(fraction == nil ? .linear(duration: 0.9).repeatForever(autoreverses: false) : .smooth(duration: 0.3),
-                               value: spins)
-            }
-            .frame(width: 15, height: 15)
         }
-        .onAppear { spins = true }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(fraction.map { "\(Int($0 * 100)) percent" } ?? "Running")
+        .progressViewStyle(RingProgressStyle())
+        .accessibilityLabel("Sync progress")
     }
 }
 #endif

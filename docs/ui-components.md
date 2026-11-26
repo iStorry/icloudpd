@@ -6,8 +6,9 @@ As of 26 November 2026 (branch `gallery-home`).
 
 ## At a glance
 
-- **36 custom views and styles** across 11 files.
-- **2 are unused leftovers:** `SwitchRow` and `ProgressRing` (Theme.swift). Safe to delete.
+- **34 custom views and styles** across 11 files.
+- **Native underneath, our look on top** (Styles.swift): the progress bars and the sidebar ring are `ProgressView`s, the disk bars are `Gauge`s, "Quality and folders" and "Show details" are `DisclosureGroup`s, the include chips are `Toggle`s, and Settings rows are `LabeledContent`. Each wears a custom style that draws what was there before.
+- The unused `SwitchRow` and `ProgressRing` are deleted.
 - **1 system hack:** `WindowButtonsPlacer` moves the window's close, minimise and zoom buttons.
 - Most real controls inside the custom pieces are already native: switches, menus, date pickers, steppers, text fields, checkboxes.
 
@@ -25,8 +26,6 @@ As of 26 November 2026 (branch `gallery-home`).
 | `LabeledField` | Theme.swift | Text field in a rounded well with a label above (sign-in) | `TextField` with `.textFieldStyle(.roundedBorder)`, or in a `Form` | The field inside is native; only the well is custom. |
 | `ErrorBanner` | Theme.swift | Red rounded message | `Label` in a `GroupBox`, or an `.alert` | |
 | `HeroTile`, `IconTile`, `AuthIcon` | Theme.swift, HomeView.swift, AuthViews.swift | Symbol on a tinted rounded square | None (decoration) | Fine to keep. |
-| `ProgressRing` | Theme.swift | Circular progress track | `ProgressView(value:).progressViewStyle(.circular)` or `Gauge` | **Unused.** Delete. |
-| `SwitchRow` | Theme.swift | Label with a switch | `Toggle` in a `Form` | **Unused.** Delete. |
 
 ## Window and sidebar
 
@@ -100,10 +99,9 @@ As of 26 November 2026 (branch `gallery-home`).
 
 ## Where switching to native pays off most
 
-1. **Settings rows → grouped `Form`.** Close to the same look, and native focus, keyboard and VoiceOver come free.
-2. **Hand-made fold-outs → `DisclosureGroup`** ("Quality and folders", "Show details").
-3. **Space panel and disk bar → `Gauge(.linearCapacity)`.**
-4. **Album search → `.searchable`.**
-5. **Delete `SwitchRow` and `ProgressRing`.**
+1. **Settings cards → a grouped `Form`.** The rows are `LabeledContent` already; a `Form` would add keyboard movement between them.
+2. **Album search → `.searchable`.**
+
+Done: the fold-outs, disk bars, progress bars, include chips and Settings rows are native controls with our styles (Styles.swift), and the two unused leftovers are deleted.
 
 Keep custom: the photo walls, hero, sidebar look, big choice cards and button styles. They carry the premium look the native versions lack.

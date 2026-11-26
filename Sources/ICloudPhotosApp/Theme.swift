@@ -141,22 +141,6 @@ struct CardRow<Content: View>: View {
     }
 }
 
-/// A label on the left and a switch on the right.
-struct SwitchRow: View {
-    let title: String
-    @Binding var isOn: Bool
-
-    var body: some View {
-        CardRow {
-            Text(title)
-            Spacer(minLength: 8)
-            Toggle(title, isOn: $isOn)
-                .labelsHidden()
-                .toggleStyle(.switch)
-        }
-    }
-}
-
 /// A text field with its label above it, in the rounded well the sign-in screens use.
 struct LabeledField<Content: View>: View {
     let title: String
@@ -209,31 +193,6 @@ struct HeroTile: View {
             .frame(width: 72, height: 72)
             .panel(cornerRadius: 22, fill: Theme.fieldFill, stroke: Theme.fieldStroke)
             .shadow(color: .black.opacity(0.5), radius: 20, y: 16)
-    }
-}
-
-// MARK: Progress ring
-
-/// A circular track with an optional accent arc and anything in the middle.
-struct ProgressRing<Center: View>: View {
-    /// 0...1, or nil for an empty track.
-    var progress: Double?
-    var lineWidth: CGFloat = 10
-    @ViewBuilder var center: Center
-
-    var body: some View {
-        ZStack {
-            Circle().stroke(Color.white.opacity(0.09), lineWidth: lineWidth)
-            if let progress {
-                Circle()
-                    .trim(from: 0, to: max(0.004, min(progress, 1)))
-                    .stroke(Theme.accent, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
-                    .rotationEffect(.degrees(-90))
-                    .animation(.smooth(duration: 0.4), value: progress)
-            }
-            center
-        }
-        .padding(lineWidth / 2)
     }
 }
 #endif

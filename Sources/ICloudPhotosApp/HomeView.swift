@@ -212,19 +212,10 @@ struct AppSidebar: View {
                     .font(.system(size: 13))
                     .foregroundStyle(Theme.secondary)
                     .lineLimit(1)
-                GeometryReader { geo in
-                    let photos = Double(glance.bytes) / Double(capacity)
-                    let other = Double(max(0, capacity - free - glance.bytes)) / Double(capacity)
-                    HStack(spacing: 1) {
-                        Rectangle().fill(Theme.accent).frame(width: max(2, geo.size.width * photos))
-                        Rectangle().fill(Color.white.opacity(0.26)).frame(width: geo.size.width * other)
-                        Spacer(minLength: 0)
-                    }
+                Gauge(value: Double(capacity - free) / Double(capacity)) {
+                    Text("Space used")
                 }
-                .frame(height: 6)
-                .background(Color.white.opacity(0.08))
-                .clipShape(.capsule)
-                .accessibilityHidden(true)
+                .gaugeStyle(CapacityBarStyle(photos: Double(glance.bytes) / Double(capacity)))
                 Text(low ? "Running low on space" : "Your photos use \(Self.size(glance.bytes))")
                     .font(.system(size: 12))
                     .foregroundStyle(low ? Theme.warning : Theme.secondary)
@@ -708,22 +699,8 @@ struct IncludeChip: View {
     @Binding var isOn: Bool
 
     var body: some View {
-        Button { isOn.toggle() } label: {
-            HStack(spacing: 6) {
-                Image(systemName: isOn ? "checkmark" : "plus")
-                    .font(.system(size: 10, weight: .bold))
-                Text(title).lineLimit(1)
-            }
-            .font(.system(size: 12, weight: .medium))
-            .foregroundStyle(isOn ? Color.white : Theme.secondary)
-            .padding(.horizontal, 12)
-            .frame(height: 30)
-            .background(isOn ? Theme.accent.opacity(0.24) : Color.white.opacity(0.04), in: .capsule)
-            .overlay(Capsule().strokeBorder(isOn ? Theme.accent.opacity(0.7) : Color.white.opacity(0.12)))
-            .contentShape(.capsule)
-        }
-        .buttonStyle(.plain)
-        .accessibilityAddTraits(isOn ? .isSelected : [])
+        Toggle(title, isOn: $isOn)
+            .toggleStyle(ChipToggleStyle())
     }
 }
 // MARK: First launch

@@ -127,7 +127,10 @@ struct SettingRow<Control: View>: View {
     @ViewBuilder var control: Control
 
     var body: some View {
-        HStack(spacing: 12) {
+        // A native labelled row underneath, so the title, its line and the control are read as one.
+        LabeledContent {
+            control
+        } label: {
             VStack(alignment: .leading, spacing: 3) {
                 Text(title)
                     .font(.system(size: 14))
@@ -139,12 +142,8 @@ struct SettingRow<Control: View>: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            Spacer(minLength: 8)
-            control
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 9)
-        .frame(maxWidth: .infinity, minHeight: 50, alignment: .leading)
+        .labeledContentStyle(SettingRowStyle())
     }
 }
 
