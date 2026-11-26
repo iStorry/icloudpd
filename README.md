@@ -65,6 +65,24 @@ It's a Swift reimplementation of the open-source [icloudpd](https://github.com/i
 - **Running it**: parallel downloads that resume after interruptions, scheduled runs, a menu bar mode,
   notifications when a run ends, and open at login.
 
+## Speed
+
+Measured against the original icloudpd 1.34.0, on the same account with the same options, on an M2 Pro
+Mac over home Wi-Fi (26 November 2026). The album had 1,344 photos and videos. Each test ran two or three
+times, and the middle result is shown.
+
+| | Original icloudpd | This app | |
+|---|---|---|---|
+| Download the newest 100 (123 files, 911 MB) | 2 min 34 s | **45 s** | 3.4× faster |
+| Sync again when nothing is new | 7.1 s | **4.4 s** | 1.6× faster |
+| Look through all 1,344 items | 37.7 s | **34.5 s** | about the same |
+| Start up | 1.7 s | **0.005 s** | instant |
+
+Downloads are faster because this app saves 4 files at a time, and the original saves one. Set to one
+at a time (`--threads-num 1`), this app took about as long as the original (2 min 42 s to 2 min 58 s).
+Looking through the library is mostly waiting for Apple's servers, so both take about the same time.
+Times depend on your internet connection.
+
 ## Not supported
 
 - **Security keys (FIDO)**: macOS only lets an app use security keys for its own website, so these
