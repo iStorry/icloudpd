@@ -24,6 +24,12 @@ final class FakeICloud: URLProtocol {
     /// When set, a delete request with several photos is refused as a whole, the way an atomic one is.
     nonisolated(unsafe) static var refuseBatchDeletes = false
     nonisolated(unsafe) static var modifyRequests = 0
+    /// When set, download links from the listing (generation 0) answer 410 Gone; records/lookup
+    /// hands out generation 1 links, which work.
+    nonisolated(unsafe) static var expireListedLinks = false
+    /// Assets records/lookup answers NOT_FOUND for, as if they left iCloud after the listing.
+    nonisolated(unsafe) static var goneOnLookup = Set<String>()
+    nonisolated(unsafe) static var lookupRequests = 0
     nonisolated(unsafe) static var listingRequests = 0
     nonisolated(unsafe) static var zoneListRequests = 0
     /// Extra library zones besides PrimarySync, with the indexing state each one reports.
@@ -40,6 +46,9 @@ final class FakeICloud: URLProtocol {
         truncateFirstDownload = nil
         truncated = []
         refuseBatchDeletes = false
+        expireListedLinks = false
+        goneOnLookup = []
+        lookupRequests = 0
         listingRequests = 0
         zoneListRequests = 0
         zones = [:]
@@ -87,15 +96,19 @@ final class FakeICloud: URLProtocol {
         client?.urlProtocolDidFinishLoading(self)
     }
 
-    static func records(for photo: Photo) -> [[String: Any]] {
+    static func records(for photo: Photo) -> [[String: Any]] { records(for: photo, linkGeneration: 0) }
+
+    /// Generation 0 links are /file/<id>/..., later ones /file/g<n>/<id>/...
+    static func records(for photo: Photo, linkGeneration: Int) -> [[String: Any]] {
+        let base = "https://fake.icloud.test/file/" + (linkGeneration > 0 ? "g\(linkGeneration)/" : "")
         var master: [String: Any] = [
             "filenameEnc": ["type": "STRING", "value": photo.name],
             "itemType": ["value": photo.name.hasSuffix(".MOV") ? "com.apple.quicktime-movie" : "public.jpeg"],
-            "resOriginalRes": ["value": ["size": photo.data.count, "downloadURL": "https://fake.icloud.test/file/\(photo.id)/${f}", "fileChecksum": "c"]],
+            "resOriginalRes": ["value": ["size": photo.data.count, "downloadURL": "\(base)\(photo.id)/${f}", "fileChecksum": "c"]],
             "resOriginalFileType": ["value": photo.name.hasSuffix(".MOV") ? "com.apple.quicktime-movie" : "public.jpeg"],
         ]
         if let live = photo.live {
-            master["resOriginalVidComplRes"] = ["value": ["size": live.count, "downloadURL": "https://fake.icloud.test/file/\(photo.id)-live/${f}", "fileChecksum": "l"]]
+            master["resOriginalVidComplRes"] = ["value": ["size": live.count, "downloadURL": "\(base)\(photo.id)-live/${f}", "fileChecksum": "l"]]
             master["resOriginalVidComplFileType"] = ["value": "com.apple.quicktime-movie"]
         }
         return [
@@ -117,7 +130,11 @@ final class FakeICloud: URLProtocol {
         let path = url.path
 
         if path.hasPrefix("/file/") {
-            let id = path.split(separator: "/")[1]
+            var parts = path.split(separator: "/").dropFirst()
+            let isRenewed = parts.first?.hasPrefix("g") == true
+            if isRenewed { parts = parts.dropFirst() }
+            if FakeICloud.expireListedLinks && !isRenewed { return respond(410) }
+            let id = parts.first!
             let isLive = id.hasSuffix("-live")
             let baseID = isLive ? String(id.dropLast(5)) : String(id)
             guard let photo = FakeICloud.photos.first(where: { $0.id == baseID }) else { return respond(404) }
@@ -139,6 +156,16 @@ final class FakeICloud: URLProtocol {
         }
 
         let body = FakeICloud.body(of: request)
+        if path.hasSuffix("/records/lookup") {
+            FakeICloud.lookupRequests += 1
+            let names = (body["records"] as? [[String: Any]] ?? []).compactMap { $0["recordName"] as? String }
+            let known = FakeICloud.photos.filter { !FakeICloud.goneOnLookup.contains($0.id) }
+                .flatMap { FakeICloud.records(for: $0, linkGeneration: 1) }
+            return respond(200, json: ["records": names.map { name in
+                known.first { $0["recordName"] as? String == name }
+                    ?? ["recordName": name, "serverErrorCode": "NOT_FOUND", "reason": "Record not found"]
+            }])
+        }
         if path.hasSuffix("/records/modify") {
             let ops = body["operations"] as? [[String: Any]] ?? []
             FakeICloud.modifyRequests += 1
@@ -288,6 +315,27 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertGreaterThan(FakeICloud.rangeRequests, 0)
         XCTAssertEqual(try Data(contentsOf: dir.appendingPathComponent("IMG_0000.JPG")), Data(repeating: 0, count: 1000))
         XCTAssertFalse(files().contains { $0.hasSuffix(".part") })
+    }
+
+    func testExpiredLinksAreRenewed() async throws {
+        FakeICloud.expireListedLinks = true
+        let (summary, _) = try await run()
+        XCTAssertEqual(summary.filesFailed, 0)
+        XCTAssertEqual(summary.filesDownloaded, 8) // the Live Photo video's link is renewed too
+        XCTAssertEqual(FakeICloud.lookupRequests, 8) // one lookup per expired file, no retries on the old link
+        XCTAssertEqual(try Data(contentsOf: dir.appendingPathComponent("IMG_0003.JPG")), Data(repeating: 3, count: 1003))
+    }
+
+    func testExpiredLinkOfAPhotoThatLeftICloudIsReported() async throws {
+        FakeICloud.expireListedLinks = true
+        FakeICloud.goneOnLookup = ["p2"]
+        let (summary, events) = try await run { $0.skipLivePhotos = true }
+        XCTAssertEqual(summary.filesDownloaded, 6)
+        XCTAssertEqual(summary.filesFailed, 1)
+        XCTAssertFalse(files().contains("IMG_0002.JPG"))
+        let failure = events.all.compactMap { if case .failed(let name, let message) = $0 { return (name, message) } else { return nil } }
+        XCTAssertEqual(failure.first?.0, "IMG_0002.JPG")
+        XCTAssertTrue(failure.first?.1.contains("no longer in iCloud") == true, failure.first?.1 ?? "")
     }
 
     func testMoveModeDeletesOldPhotosFromICloud() async throws {

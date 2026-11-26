@@ -349,6 +349,23 @@ public final class PhotoLibrary: @unchecked Sendable {
         let records: [[String: Any]]
     }
 
+    /// Fetches an asset's records again (CloudKit records/lookup), for new download links once the
+    /// listed ones have expired. Nil when iCloud no longer has the asset or its master.
+    public func lookUp(_ asset: PhotoAsset) async throws -> PhotoAsset? {
+        let body: [String: Any] = [
+            "records": [["recordName": asset.id], ["recordName": asset.assetRecordName]],
+            "desiredKeys": PhotoAlbum.desiredKeys,
+            "zoneID": zoneID,
+        ]
+        let records = try await post("records/lookup", body)["records"] as? [[String: Any]] ?? []
+        func record(_ name: String) -> [String: Any]? {
+            records.first { $0["recordName"] as? String == name && $0["serverErrorCode"] == nil && $0["fields"] != nil }
+        }
+        guard let master = record(asset.id), let assetRecord = record(asset.assetRecordName) else { return nil }
+        let fresh = PhotoAsset(master: master, asset: assetRecord)
+        return fresh.isDeleted ? nil : fresh
+    }
+
     // MARK: Changes
 
     static func deleteOperation(_ asset: PhotoAsset) throws -> [String: Any] {
