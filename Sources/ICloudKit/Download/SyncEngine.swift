@@ -237,7 +237,7 @@ public final class SyncEngine: @unchecked Sendable {
 
     // MARK: Downloading one asset
 
-    func process(_ asset: PhotoAsset, http: HTTPClient) async throws -> AssetResult {
+    func process(_ asset: PhotoAsset, library: PhotoLibrary) async throws -> AssetResult {
         var result = AssetResult()
         let c = configuration
         let (files, missing) = plan(asset)
@@ -265,7 +265,7 @@ public final class SyncEngine: @unchecked Sendable {
                     result.present = false
                 } else {
                     do {
-                        try await download(file, to: target, http: http, created: asset.createdDate)
+                        let version = try await downloadRenewingLink(file, of: asset, to: target, library: library)
                         reservations.release(target)
                         if c.setExifDatetime, !file.isLivePhotoVideo, ExifDate.isJPEG(target) {
                             if ExifDate.setIfMissing(target, date: asset.createdDate) {
@@ -273,10 +273,10 @@ public final class SyncEngine: @unchecked Sendable {
                             }
                         }
                         result.downloaded = true
-                        result.bytes += file.version.size
+                        result.bytes += version.size
                         result.createdPaths.append(relative(target))
                         result.expectedPaths.append(relative(target))
-                        emit(.downloaded(path: relative(target), bytes: file.version.size))
+                        emit(.downloaded(path: relative(target), bytes: version.size))
                     } catch {
                         reservations.release(target)
                         if error is CancellationError { throw error }
@@ -321,6 +321,33 @@ public final class SyncEngine: @unchecked Sendable {
         return false
     }
 
+    /// iCloud's download links expire; an old one answers 410 Gone (#38).
+    static func isExpiredLink(_ error: Error) -> Bool {
+        if case ICloudError.http(let status, _) = error, status == 410 { return true }
+        return false
+    }
+
+    /// Downloads a file, and when its link has expired, asks iCloud for the asset again and
+    /// downloads it with the new link. Returns the version that was downloaded.
+    func downloadRenewingLink(_ file: PlannedFile, of asset: PhotoAsset, to target: URL,
+                              library: PhotoLibrary) async throws -> AssetVersion {
+        do {
+            try await download(file, to: target, http: library.http, created: asset.createdDate)
+            return file.version
+        } catch where SyncEngine.isExpiredLink(error) {
+            log(.debug, "The download link for \(relative(target)) expired; asking iCloud for a new one")
+            guard let fresh = try await library.lookUp(asset) else {
+                throw ICloudError.http(status: 410, message: "The download link expired and the photo is no longer in iCloud.")
+            }
+            guard let renewed = plan(fresh).files.first(where: { $0.size == file.size && $0.isLivePhotoVideo == file.isLivePhotoVideo })
+            else {
+                throw ICloudError.http(status: 410, message: "The download link expired and iCloud no longer has this file.")
+            }
+            try await download(renewed, to: target, http: library.http, created: fresh.createdDate)
+            return renewed.version
+        }
+    }
+
     func setDates(_ url: URL, _ date: Date) {
         try? fileManager.setAttributes([.modificationDate: date, .creationDate: date], ofItemAtPath: url.path)
     }
@@ -354,7 +381,8 @@ public final class SyncEngine: @unchecked Sendable {
             } catch {
                 if error is CancellationError || Task.isCancelled { throw CancellationError() }
                 lastError = error
-                if SyncEngine.isFatal(error) { throw error }
+                // An expired link stays expired: the caller gets a new one instead.
+                if SyncEngine.isFatal(error) || SyncEngine.isExpiredLink(error) { throw error }
                 if attempt < attempts {
                     try await Task.sleep(nanoseconds: UInt64(attempt) * 2_000_000_000)
                 }
@@ -488,7 +516,7 @@ public final class SyncEngine: @unchecked Sendable {
                         guard let slot = slots[index], slot.passed else { continue }
                         let asset = slot.asset
                         downloading += 1
-                        group.addTask { .asset(index, try await self.process(asset, http: photos.http)) }
+                        group.addTask { .asset(index, try await self.process(asset, library: library)) }
                     }
 
                     if let limit, enqueued >= limit { listingDone = true }
