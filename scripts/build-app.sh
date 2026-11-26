@@ -4,12 +4,12 @@
 #
 #   APP_VERSION=1.2.0 BUILD_NUMBER=42 scripts/build-app.sh
 #
-# APP_VERSION is the version people see (default 0.2.1); a suffix like "-beta.1" is kept out of the
+# APP_VERSION is the version people see (default 0.3.0); a suffix like "-beta.1" is kept out of the
 # app's Info.plist, which only takes numbers. BUILD_NUMBER is the internal build number (default 1).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-APP_VERSION="${APP_VERSION:-0.2.1}"
+APP_VERSION="${APP_VERSION:-0.3.0}"
 SHORT_VERSION="${APP_VERSION%%-*}"
 BUILD_NUMBER="${BUILD_NUMBER:-1}"
 

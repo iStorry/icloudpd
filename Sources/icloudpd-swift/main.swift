@@ -8,7 +8,7 @@ import Glibc
 
 // icloudpd-swift: the command-line face of ICloudKit, taking icloudpd's options.
 
-let version = "0.2.1"
+let version = "0.3.0"
 
 struct Options {
     var username: String?
