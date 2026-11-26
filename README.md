@@ -76,6 +76,10 @@ It's a Swift reimplementation of the open-source [icloudpd](https://github.com/i
 iCloud to it, with the Mac only passing the photos along. This is new: look at a few photos in Immich
 before you rely on it.
 
+<p align="center">
+  <img src="docs/images/immich.png" width="720" alt="The Immich page: a connected server, new photos sent to Immich, and Send Now for the photos already on this Mac">
+</p>
+
 **Set it up**
 
 1. In Immich, click your picture at the top right, then **Account Settings › API Keys**, and make a
