@@ -1,15 +1,13 @@
 #!/bin/bash
-# Builds Assets/AppIcon.icns (which scripts/build-app.sh puts in the app) from a square illustration
-# of a coloured icon tile on a flat, pale backdrop, by default Assets/AppIcon-source.png.
-# scripts/fit-icon.swift cuts the tile out and places it on the macOS icon grid.
+# Builds Assets/AppIcon.icns (which scripts/build-app.sh puts in the app) and Assets/AppIcon.png.
+# The icon is drawn in code by scripts/draw-icon.swift: change it there and run this again.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-SOURCE="${1:-Assets/AppIcon-source.png}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-swift scripts/fit-icon.swift "$SOURCE" "$WORK/icon.png"
+swift scripts/draw-icon.swift "$WORK/icon.png"
 
 SET="$WORK/AppIcon.iconset"
 mkdir -p "$SET"
@@ -21,4 +19,4 @@ done
 
 iconutil -c icns "$SET" -o Assets/AppIcon.icns
 cp "$WORK/icon.png" Assets/AppIcon.png
-echo "Wrote Assets/AppIcon.icns and Assets/AppIcon.png from $SOURCE"
+echo "Wrote Assets/AppIcon.icns and Assets/AppIcon.png"

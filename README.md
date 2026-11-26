@@ -1,8 +1,50 @@
-# iCloud Photos Downloader for Mac
+<p align="center">
+  <img src="Assets/AppIcon.png" width="128" alt="App icon">
+</p>
+
+<h1 align="center">iCloud Photos Downloader for Mac</h1>
+
+<p align="center">
+  Keep every photo and video from iCloud in a folder on your Mac, and make room in iCloud while you're at it.
+</p>
+
+<p align="center">
+  <a href="https://github.com/iStorry/icloudpd/releases/latest"><img src="https://img.shields.io/github/v/release/iStorry/icloudpd?include_prereleases&label=download&color=2f7cf6" alt="Latest release"></a>
+  <a href="https://github.com/iStorry/icloudpd/actions/workflows/build.yml"><img src="https://github.com/iStorry/icloudpd/actions/workflows/build.yml/badge.svg" alt="Build"></a>
+  <img src="https://img.shields.io/badge/macOS-26%20Tahoe%2B-black?logo=apple" alt="macOS 26 Tahoe or later">
+  <img src="https://img.shields.io/badge/Swift-native-F05138?logo=swift&logoColor=white" alt="Native Swift">
+</p>
+
+<p align="center">
+  <img src="docs/images/demo.gif" width="800" alt="Pressing Sync Now: the app checks the library and saves the new photos">
+</p>
 
 A native SwiftUI app and command-line tool that download your iCloud Photos library to a folder on your Mac.
 It's a Swift reimplementation of the open-source [icloudpd](https://github.com/icloud-photos-downloader/icloud_photos_downloader)
 (MIT). It doesn't need Python and doesn't bundle icloudpd.
+
+## A look around
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/home.png" alt="Home: the newest photos, how many are on this Mac and when the next sync runs"></td>
+    <td width="50%"><img src="docs/images/activity.png" alt="Activity: a sync in progress with the photos it just saved"></td>
+  </tr>
+  <tr>
+    <td align="center"><b>Home</b><br>Your newest photos, how many are safe on this Mac, and when it syncs next.</td>
+    <td align="center"><b>Sync</b><br>Plain-words progress, with each photo as it lands.</td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/images/setup.png" alt="Easy setup: back up only, or free up iCloud space"></td>
+    <td width="50%"><img src="docs/images/settings.png" alt="Settings: which photos leave iCloud and the safety checks"></td>
+  </tr>
+  <tr>
+    <td align="center"><b>Easy setup</b><br>Three questions: back up only, or free up iCloud space.</td>
+    <td align="center"><b>Settings</b><br>Photos leave iCloud only once they're safely on this Mac.</td>
+  </tr>
+</table>
+
+<sub>Screenshots use a made-up account and stock photos from <a href="https://unsplash.com">Unsplash</a>.</sub>
 
 ## Features
 
