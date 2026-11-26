@@ -718,6 +718,158 @@ struct GeneralSettings: View {
     }
 }
 
+// MARK: Immich (alpha)
+
+/// Immich's own page, from the sidebar: the connection, what Sync Now sends, and the photos already here.
+struct ImmichStage: View {
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(alignment: .center, spacing: 10) {
+                        Text("Immich")
+                            .font(.system(size: 30, weight: .bold))
+                            .tracking(-0.9)
+                        Text("ALPHA")
+                            .font(.system(size: 10, weight: .bold))
+                            .tracking(0.6)
+                            .foregroundStyle(Theme.warning)
+                            .padding(.horizontal, 8)
+                            .frame(height: 20)
+                            .background(Theme.warning.opacity(0.14), in: .capsule)
+                            .overlay(Capsule().strokeBorder(Theme.warning.opacity(0.35)))
+                    }
+                    Text("Send your photos to your own Immich server instead of keeping them on this Mac.")
+                        .font(.system(size: 14))
+                        .foregroundStyle(Theme.secondary)
+                }
+
+                if model.isDownloading {
+                    Label("This can be changed again when the run is over.", systemImage: "lock.fill")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.secondary)
+                        .padding(.horizontal, 14)
+                        .frame(height: 34)
+                        .panel(cornerRadius: 17)
+                }
+
+                Group { ImmichSettings() }
+                    .disabled(model.isDownloading)
+                    .opacity(model.isDownloading ? 0.45 : 1)
+            }
+            .frame(maxWidth: 680, alignment: .leading)
+            .padding(.horizontal, 28)
+            .padding(.top, 30)
+            .padding(.bottom, 28)
+            .frame(maxWidth: .infinity)
+        }
+        .scrollIndicators(.never)
+    }
+}
+
+struct ImmichSettings: View {
+    @EnvironmentObject var model: AppModel
+    @State private var address = ""
+    @State private var apiKey = ""
+
+    private var connecting: Bool { model.immichState == .connecting }
+    private var folderName: String { model.directory?.lastPathComponent ?? "photos" }
+
+    var body: some View {
+        Label("This is new and still being tested. Look at a few photos in Immich before you rely on it.",
+              systemImage: "flask.fill")
+            .font(.system(size: 12))
+            .foregroundStyle(Theme.warning)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .panel(cornerRadius: 14, fill: Theme.warning.opacity(0.06), stroke: Theme.warning.opacity(0.28))
+
+        if model.immichConnected {
+            SettingsSection(title: "Your Immich server") {
+                SettingRow(icon: RowIcon("checkmark", .green), title: model.immichUser ?? "Connected", detail: model.immichHost) {
+                    Button("Disconnect") { model.disconnectImmich() }
+                        .buttonStyle(PillButtonStyle(kind: .secondary, height: 28))
+                }
+            }
+        } else {
+            SettingsSection(title: "Your Immich server",
+                            footer: "Make the key in Immich: your picture at the top right, Account Settings, API Keys. It needs permission to upload. The key is kept in your Mac's Keychain.") {
+                SettingRow(icon: RowIcon("server.rack", .indigo), title: "Address") {
+                    FieldWell(width: 280, alignment: .leading) {
+                        TextField("Address", text: $address, prompt: Text("http://192.168.1.10:2283"))
+                            .autocorrectionDisabled()
+                            .onSubmit(connect)
+                    }
+                }
+                SettingRow(icon: RowIcon("key.fill", .orange), title: "API key") {
+                    FieldWell(width: 280, alignment: .leading) {
+                        SecureField("API key", text: $apiKey, prompt: Text("Paste the key here"))
+                            .onSubmit(connect)
+                    }
+                }
+                HStack(spacing: 12) {
+                    if case .failed(let message) = model.immichState {
+                        Label(message, systemImage: "exclamationmark.circle.fill")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Theme.dangerSoft)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 0)
+                    if connecting { ProgressView().controlSize(.small) }
+                    Button(connecting ? "Connecting…" : "Connect", action: connect)
+                        .buttonStyle(PillButtonStyle(height: 30))
+                        .disabled(connecting || address.trimmingCharacters(in: .whitespaces).isEmpty
+                                  || apiKey.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+            }
+        }
+
+        Group {
+            SettingsSection(title: "New photos from iCloud",
+                            footer: model.config.deletesFromICloud
+                                ? "You're also removing photos from iCloud. With this on, a photo only leaves iCloud once Immich has it."
+                                : nil) {
+                SettingSwitch(icon: RowIcon("arrow.up.circle.fill", .blue), title: "Send them to Immich",
+                              detail: "Each photo goes to Immich as soon as Sync Now has downloaded it", isOn: $model.immichSend)
+                if model.immichSend {
+                    SettingSwitch(icon: RowIcon("internaldrive.fill", .gray), title: "Keep a copy on this Mac too",
+                                  detail: model.immichKeepLocal
+                                      ? "Photos are saved in your \u{201C}\(folderName)\u{201D} folder and sent to Immich"
+                                      : "Photos only pass through this Mac, and take no space once Immich has them",
+                                  isOn: $model.immichKeepLocal)
+                }
+            }
+
+            SettingsSection(title: "Photos already on this Mac",
+                            footer: "Immich keeps one copy of a photo however often it's sent, so you can run this again any time.") {
+                SettingRow(icon: RowIcon("folder.fill", .cyan), title: "Send them to Immich",
+                           detail: model.directory == nil ? "Choose a folder in Settings first"
+                               : "Everything in your \u{201C}\(folderName)\u{201D} folder. The files stay on this Mac.") {
+                    Button("Send Now") { model.uploadExistingToImmich() }
+                        .buttonStyle(PillButtonStyle(kind: .secondary, height: 28))
+                        .disabled(model.directory == nil)
+                }
+            }
+        }
+        .disabled(!model.immichConnected)
+        .opacity(model.immichConnected ? 1 : 0.45)
+    }
+
+    private func connect() {
+        guard !connecting, !address.isEmpty, !apiKey.isEmpty else { return }
+        let key = apiKey
+        Task {
+            await model.connectImmich(address: address, apiKey: key)
+            if model.immichConnected { apiKey = "" }
+        }
+    }
+}
+
 // MARK: Advanced
 
 struct AdvancedSettings: View {

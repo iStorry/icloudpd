@@ -407,7 +407,7 @@ func runOnce(_ o: Options, console: Console) async throws -> Int32 {
             else { console.log(.info, "[DRY RUN] Would download \(path)") }
         case .alreadyExists(let path): console.log(.debug, "\(path) already exists")
         case .failed(let name, let message): console.log(.error, "Could not download \(name): \(message)")
-        case .deletedLocally, .deletedFromICloud: break
+        case .deletedLocally, .deletedFromICloud, .sent: break
         case .pruned(let path): console.log(.info, "\(runConfig.dryRun ? "[DRY RUN] Would move" : "Moved") orphan \(path) to .icloudpd-swift-pruned/")
         }
     }

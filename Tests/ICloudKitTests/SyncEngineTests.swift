@@ -297,6 +297,86 @@ final class SyncEngineTests: XCTestCase {
             .filter { !$0.hasPrefix(".icloudpd-swift") }.sorted()
     }
 
+    // MARK: Sending on (Immich)
+
+    final class Outbox: @unchecked Sendable {
+        let lock = NSLock()
+        var names: [String] = []
+        var failing: Set<String> = []
+        func take(_ url: URL) throws {
+            lock.lock(); defer { lock.unlock() }
+            if failing.contains(url.lastPathComponent) { throw ImmichError.http(status: 500, message: "no") }
+            XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+            names.append(url.lastPathComponent)
+        }
+    }
+
+    func runSending(keepLocal: Bool, outbox: Outbox, _ edit: (inout SyncConfiguration) -> Void = { _ in }) async throws -> SyncSummary {
+        var config = SyncConfiguration(directoryPath: dir.path)
+        config.folderStructure = "{:%Y}"
+        edit(&config)
+        let transfer = SyncTransfer(ledger: TransferLedger(directory: dir, name: "test"), keepLocal: keepLocal) { file, _, _ in
+            try outbox.take(file)
+        }
+        let engine = try SyncEngine(configuration: config, timeZone: TimeZone(identifier: "UTC")!, transfer: transfer) { _ in }
+        return try await engine.run(photos: service())
+    }
+
+    func testSendsOnWithoutKeepingAndDoesNotDownloadAgain() async throws {
+        let outbox = Outbox()
+        let first = try await runSending(keepLocal: false, outbox: outbox)
+        XCTAssertEqual(first.filesDownloaded, 8)
+        XCTAssertEqual(first.filesSent, 8)
+        XCTAssertEqual(outbox.names.count, 8)
+        XCTAssertEqual(files(), []) // nothing stays, not even the year folders
+
+        let second = try await runSending(keepLocal: false, outbox: outbox)
+        XCTAssertEqual(second.filesDownloaded, 0)
+        XCTAssertEqual(second.filesSent, 0)
+        XCTAssertEqual(second.filesExisting, 7)
+        XCTAssertEqual(outbox.names.count, 8)
+    }
+
+    func testAFileThatDidNotArriveStaysAndIsSentNextTime() async throws {
+        let outbox = Outbox()
+        outbox.failing = ["IMG_0003.JPG"]
+        let first = try await runSending(keepLocal: false, outbox: outbox) { $0.keepICloudRecentDays = 0 }
+        XCTAssertEqual(first.filesSent, 7)
+        XCTAssertEqual(first.filesFailed, 1)
+        XCTAssertEqual(first.deletedFromICloud, 6) // the one Immich doesn't have stays in iCloud
+        XCTAssertEqual(files().map { ($0 as NSString).lastPathComponent }.filter { $0.hasPrefix("IMG") }, ["IMG_0003.JPG"])
+
+        outbox.failing = []
+        let second = try await runSending(keepLocal: false, outbox: outbox) { $0.keepICloudRecentDays = 0 }
+        XCTAssertEqual(second.filesDownloaded, 0)
+        XCTAssertEqual(second.filesSent, 1)
+        XCTAssertEqual(second.deletedFromICloud, 1)
+        XCTAssertEqual(files(), [])
+    }
+
+    func testKeepingACopySendsFilesSavedBefore() async throws {
+        _ = try await run { $0.folderStructure = "{:%Y}" } // saved before sending was switched on
+        let outbox = Outbox()
+        let summary = try await runSending(keepLocal: true, outbox: outbox)
+        XCTAssertEqual(summary.filesDownloaded, 0)
+        XCTAssertEqual(summary.filesSent, 8)
+        XCTAssertEqual(files().filter { $0.contains("IMG") }.count, 8)
+
+        // The folder can be sent as a whole too; what the sync sent isn't sent again.
+        let again = try await FolderUpload.run(directory: dir, transfer: SyncTransfer(
+            ledger: TransferLedger(directory: dir, name: "test"), keepLocal: true) { file, _, _ in try outbox.take(file) }) { _ in }
+        XCTAssertEqual(again, FolderUpload.Summary(sent: 0, alreadySent: 8, failed: 0))
+    }
+
+    func testImmichAddresses() {
+        XCTAssertEqual(ImmichClient.normalise("192.168.1.10:2283")?.absoluteString, "http://192.168.1.10:2283")
+        XCTAssertEqual(ImmichClient.normalise(" https://photos.example.com/api/ ")?.absoluteString, "https://photos.example.com")
+        XCTAssertEqual(ImmichClient.normalise("photos.example.com")?.absoluteString, "https://photos.example.com")
+        XCTAssertEqual(ImmichClient.normalise("nas.local")?.absoluteString, "http://nas.local")
+        XCTAssertNil(ImmichClient.normalise("my server"))
+        XCTAssertNil(ImmichClient.normalise(""))
+    }
+
     func testDownloadsEverythingThenSkips() async throws {
         let (first, _) = try await run()
         XCTAssertEqual(first.filesDownloaded, 8) // 7 photos + 1 Live Photo video

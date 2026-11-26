@@ -22,6 +22,8 @@ public enum SyncEvent: Sendable {
     case deletedLocally(path: String)
     case deletedFromICloud(name: String)
     case pruned(path: String)
+    /// The file was sent on (to Immich).
+    case sent(path: String)
 }
 
 public struct SyncSummary: Equatable, Sendable {
@@ -34,6 +36,8 @@ public struct SyncSummary: Equatable, Sendable {
     public var deletedLocally = 0
     public var deletedFromICloud = 0
     public var pruned = 0
+    /// Files sent on (to Immich) by this run.
+    public var filesSent = 0
     public var stoppedByUntilFound = false
     /// iCloud kept answering 503 to deletes, so the run stopped deleting and only downloaded.
     public var deletesPausedByThrottling = false
@@ -52,6 +56,7 @@ struct AssetResult {
     var expectedPaths: [String] = []
     var bytes = 0
     var failures = 0
+    var sent = 0
 }
 
 /// The download run: a port of icloudpd's core_single_run / download_builder / autodelete,
@@ -59,6 +64,8 @@ struct AssetResult {
 public final class SyncEngine: @unchecked Sendable {
     public let configuration: SyncConfiguration
     let emit: @Sendable (SyncEvent) -> Void
+    /// Set when the run's files go on to somewhere else once they are downloaded.
+    let transfer: SyncTransfer?
     let timeZone: TimeZone
     let folderFormat: FolderFormat
     let fileManager = FileManager.default
@@ -70,7 +77,7 @@ public final class SyncEngine: @unchecked Sendable {
     private let rootPaths: [String]
     var reservationsForTests: PathReservations { reservations }
 
-    public init(configuration: SyncConfiguration, timeZone: TimeZone = .current,
+    public init(configuration: SyncConfiguration, timeZone: TimeZone = .current, transfer: SyncTransfer? = nil,
                 events: @escaping @Sendable (SyncEvent) -> Void) throws {
         try configuration.validate()
         self.configuration = configuration
@@ -80,6 +87,7 @@ public final class SyncEngine: @unchecked Sendable {
         self.excluded = configuration.excludeFilenames.compactMap(FilenamePolicy.globExpression)
         self.rootPaths = [configuration.directory, configuration.livePhotoDirectory].compactMap { $0?.standardizedFileURL.path }
         self.emit = events
+        self.transfer = transfer
     }
 
     var dryRun: Bool { configuration.dryRun }
@@ -216,7 +224,10 @@ public final class SyncEngine: @unchecked Sendable {
         while true {
             var unknown: (url: URL, size: Int)?
             let outcome: (url: URL?, existing: URL?)? = reservations.withLock { reserved in
-                func size(_ url: URL) -> Int? { reserved[url.path] ?? folders.size(of: url) ?? fileSize(url) }
+                // A file that was sent on and is no longer here still counts as downloaded.
+                func size(_ url: URL) -> Int? {
+                    reserved[url.path] ?? folders.size(of: url) ?? fileSize(url) ?? transfer?.ledger.size(of: relative(url))
+                }
                 var target = file.url
                 var existing = size(target)
                 var legacy: URL?
@@ -270,11 +281,17 @@ public final class SyncEngine: @unchecked Sendable {
             try Task.checkCancellation()
             let (target, existing) = resolve(file, asset: asset)
             let finalURL: URL
+            /// The file is here and still has to be sent on.
+            var needsSending = false
             if let existing {
                 if !file.isLivePhotoVideo { result.foundExisting = true }
                 result.expectedPaths.append(relative(existing))
                 emit(.alreadyExists(path: relative(existing)))
                 finalURL = existing
+                // Saved by an earlier run, before sending was switched on or when sending failed.
+                if let transfer, !dryRun, !transfer.ledger.contains(relative(existing)) {
+                    needsSending = fileManager.fileExists(atPath: existing.path)
+                }
             } else if let target {
                 if !file.isLivePhotoVideo { result.foundMissing = true }
                 if c.xmpSidecarOnly {
@@ -298,6 +315,10 @@ public final class SyncEngine: @unchecked Sendable {
                         result.createdPaths.append(relative(target))
                         result.expectedPaths.append(relative(target))
                         emit(.downloaded(path: relative(target), bytes: version.size))
+                        if let transfer {
+                            needsSending = true
+                            if !transfer.keepLocal { transfer.ledger.markPending(relative(target)) }
+                        }
                     } catch {
                         reservations.release(target)
                         if error is CancellationError { throw error }
@@ -312,8 +333,10 @@ public final class SyncEngine: @unchecked Sendable {
                 continue
             }
 
-            if c.xmpSidecar || c.xmpSidecarOnly, !file.isLivePhotoVideo {
-                let sidecar = URL(fileURLWithPath: finalURL.path + ".xmp")
+            let sidecar = URL(fileURLWithPath: finalURL.path + ".xmp")
+            // A file that was sent on and removed from this Mac gets no sidecar written next to nothing.
+            let gone = transfer != nil && !needsSending && !fileManager.fileExists(atPath: finalURL.path)
+            if c.xmpSidecar || c.xmpSidecarOnly, !file.isLivePhotoVideo, !gone {
                 result.expectedPaths.append(relative(sidecar))
                 if !dryRun {
                     let existed = fileManager.fileExists(atPath: sidecar.path)
@@ -325,6 +348,29 @@ public final class SyncEngine: @unchecked Sendable {
                     } catch {
                         log(.warning, "Could not write XMP sidecar \(relative(sidecar)): \(error.localizedDescription)")
                     }
+                }
+            }
+
+            if needsSending, let transfer {
+                let path = relative(finalURL)
+                let hasSidecar = !file.isLivePhotoVideo && fileManager.fileExists(atPath: sidecar.path)
+                do {
+                    try await transfer.send(finalURL, hasSidecar ? sidecar : nil, asset.createdDate)
+                    let passingThrough = transfer.ledger.isPending(path)
+                    transfer.ledger.record(path, size: file.version.size)
+                    result.sent += 1
+                    emit(.sent(path: path))
+                    if passingThrough, !transfer.keepLocal {
+                        try? fileManager.removeItem(at: finalURL)
+                        if hasSidecar { try? fileManager.removeItem(at: sidecar) }
+                    }
+                } catch {
+                    if error is CancellationError || Task.isCancelled { throw CancellationError() }
+                    if SyncTransfer.stopsRun(error) { throw error }
+                    // Not safely at its destination, so it is no reason to remove the photo from iCloud.
+                    result.present = false
+                    result.failures += 1
+                    emit(.failed(name: path, message: error.localizedDescription))
                 }
             }
         }
@@ -417,6 +463,8 @@ public final class SyncEngine: @unchecked Sendable {
     public func run(photos: PhotosService) async throws -> SyncSummary {
         let c = configuration
         var summary = SyncSummary()
+        // Also when the run is stopped or fails: what was sent must not be sent, or downloaded, again.
+        defer { if !dryRun { transfer?.ledger.save() } }
         let library = try await photos.library(named: c.library)
         await library.recheckIndexing()
         if library.indexingStateIgnored {
@@ -491,6 +539,7 @@ public final class SyncEngine: @unchecked Sendable {
                             summary.filesDownloaded += result.createdPaths.filter { !$0.hasSuffix(".xmp") }.count
                             summary.bytesDownloaded += result.bytes
                             summary.filesFailed += result.failures
+                            summary.filesSent += result.sent
                             summary.filesExisting += result.foundExisting ? 1 : 0
                             if result.foundMissing { consecutiveFound = 0 }
                             else if result.foundExisting { consecutiveFound += 1 }
@@ -583,6 +632,10 @@ public final class SyncEngine: @unchecked Sendable {
             if !dryRun { tracker.save() }
             prune = tracker
         }
+        if let transfer, !dryRun {
+            transfer.ledger.save()
+            if !transfer.keepLocal { removeEmptyFolders(in: c.directory) }
+        }
         return summary
     }
 
@@ -658,6 +711,19 @@ public final class SyncEngine: @unchecked Sendable {
             }
         }
         return nil
+    }
+
+    /// Removes the dated folders that sending their files on left empty. `rmdir` only removes a
+    /// folder with nothing in it, so nothing else can be lost.
+    func removeEmptyFolders(in root: URL) {
+        guard let walker = fileManager.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey],
+                                                  options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return }
+        var folders: [String] = []
+        for case let url as URL in walker where (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
+            folders.append(url.path)
+        }
+        // Deepest first, so a year empties once its months are gone.
+        for path in folders.sorted(by: { $0.count > $1.count }) { rmdir(path) }
     }
 
     // MARK: Auto-delete

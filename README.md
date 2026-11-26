@@ -5,7 +5,8 @@
 <h1 align="center">iCloud Photos Downloader for Mac</h1>
 
 <p align="center">
-  Keep every photo and video from iCloud in a folder on your Mac, and make room in iCloud while you're at it.
+  Keep every photo and video from iCloud in a folder on your Mac, and make room in iCloud while you're at it.<br>
+  New: send them to your own <a href="https://immich.app">Immich</a> server instead (alpha).
 </p>
 
 <p align="center">
@@ -21,7 +22,8 @@
 
 A native SwiftUI app and command-line tool that download your iCloud Photos library to a folder on your Mac.
 It's a Swift reimplementation of the open-source [icloudpd](https://github.com/icloud-photos-downloader/icloud_photos_downloader)
-(MIT). It doesn't need Python and doesn't bundle icloudpd.
+(MIT). It doesn't need Python and doesn't bundle icloudpd. It can also pass your photos on to an
+[Immich](https://immich.app) server, so they needn't stay on the Mac at all.
 
 ## A look around
 
@@ -62,8 +64,51 @@ It's a Swift reimplementation of the open-source [icloudpd](https://github.com/i
 - **Sync**: auto-delete local files removed from iCloud, delete from iCloud after download, keep the last
   N days in iCloud, prune local files that left the library (quarantined, not deleted), a delete list,
   and dry run.
+- **Immich (alpha)**: send photos to your own [Immich](https://immich.app) server as they're downloaded,
+  instead of keeping them on the Mac or as well as that, and send the photos already in your folder.
+  See [Send your photos to Immich](#send-your-photos-to-immich-alpha).
 - **Running it**: parallel downloads that resume after interruptions, scheduled runs, a menu bar mode,
   notifications when a run ends, and open at login.
+
+## Send your photos to Immich (alpha)
+
+[Immich](https://immich.app) is a photo server you run yourself. The app can move your library from
+iCloud to it, with the Mac only passing the photos along. This is new: look at a few photos in Immich
+before you rely on it.
+
+<p align="center">
+  <img src="docs/images/immich.png" width="720" alt="The Immich page: a connected server, new photos sent to Immich, and Send Now for the photos already on this Mac">
+</p>
+
+**Set it up**
+
+1. In Immich, click your picture at the top right, then **Account Settings › API Keys**, and make a
+   key that is allowed to upload (the `asset.upload` permission).
+2. In the app, open **Immich** in the sidebar. Type your server's address, such as
+   `http://192.168.1.10:2283`, paste the key, and click **Connect**. The key is kept in your Keychain.
+3. Turn on **Send them to Immich**. From then on **Sync Now**, and the nightly sync, send each photo
+   to Immich as soon as it's downloaded.
+
+**What it does**
+
+- **Instead of the Mac, or as well**: by default a photo is removed from the Mac once Immich has it,
+  so a big library needs almost no space here. Turn on **Keep a copy on this Mac too** to have both.
+- **Photos you already downloaded**: **Send Now** sends everything in your photos folder to Immich.
+  Those files stay where they are.
+- **Nothing twice**: the app remembers what it sent, so a photo isn't downloaded or sent again. Immich
+  is also asked first whether it already has a file, so one you added another way isn't uploaded again.
+- **Safe with Free up iCloud**: a photo only leaves iCloud once Immich has it. One that didn't arrive
+  stays on the Mac and in iCloud, and is sent the next time you sync.
+- **Stops early**: if the server is off or the key is refused, the sync stops before downloading anything.
+- **Sidecars**: with XMP sidecars on, each photo's sidecar is sent along with it.
+
+**Not yet**
+
+- Deleting a photo in iCloud doesn't delete it from Immich.
+- Albums aren't made in Immich. Live Photos go as a photo and a video, which Immich pairs itself.
+- The command-line tool has no Immich option.
+- A photo is first downloaded to your folder and then sent, so the folder's disk needs room for the
+  largest video twice over while it passes through.
 
 ## Speed
 
@@ -122,7 +167,8 @@ Times depend on your internet connection.
    new photos each night by itself.
 
 After that, the home page shows your newest photos and when the next sync runs. Click **Sync Now** to
-sync right away. You can change any of your answers later in **Settings**.
+sync right away. You can change any of your answers later in **Settings**. To send your photos to an
+Immich server, see [Send your photos to Immich](#send-your-photos-to-immich-alpha).
 
 ## Build and run
 

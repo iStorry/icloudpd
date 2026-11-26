@@ -39,6 +39,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleVersion</key><string>$BUILD_NUMBER</string>
   <key>LSMinimumSystemVersion</key><string>26.0</string>
   <key>NSHighResolutionCapable</key><true/>
+  <!-- Immich servers at home are usually plain http on the local network. -->
+  <key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoads</key><true/></dict>
+  <key>NSLocalNetworkUsageDescription</key><string>To send your photos to an Immich server on your network.</string>
 </dict>
 </plist>
 PLIST

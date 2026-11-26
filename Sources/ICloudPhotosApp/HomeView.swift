@@ -95,6 +95,7 @@ struct AppSidebar: View {
             VStack(spacing: 2) {
                 item("Home", "house", isOn: model.page == .library || model.page == .syncChoice) { go(.library) }
                 item("Activity", "waveform.path.ecg", isOn: model.page == .activity, busy: model.isDownloading) { go(.activity) }
+                item("Immich", "server.rack", isOn: model.page == .immich) { go(.immich) }
                 item("Settings", "slider.horizontal.3", isOn: false, isOpen: inSettings) { go(.settings) }
 
                 // Settings' sections: always there, folded to no height when Settings isn't open,
@@ -388,8 +389,9 @@ struct HomeStage: View {
 
     private var headline: String {
         if model.directory == nil { return "Choose a folder\nto begin." }
-        if let items = model.lastRunItems, items > 0 { return "\(items.formatted()) photos and videos,\nsafe on your Mac." }
-        if model.lastRun != nil { return "Your library,\nsafe on your Mac." }
+        let place = model.immichOnly ? "in Immich" : "on your Mac"
+        if let items = model.lastRunItems, items > 0 { return "\(items.formatted()) photos and videos,\nsafe \(place)." }
+        if model.lastRun != nil { return "Your library,\nsafe \(place)." }
         return "Ready when you are."
     }
 
@@ -461,7 +463,7 @@ struct HomeStage: View {
                          foreground: removing ? Theme.warning : Theme.accentSoft,
                          background: (removing ? Theme.warning : Theme.accent).opacity(0.16))
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(PlanWords.what(model.config))
+                    Text(PlanWords.what(model.config, immich: model.sendsToImmich, keepLocal: model.immichKeepLocal))
                         .font(.system(size: 14, weight: .medium))
                         .lineSpacing(2)
                         .fixedSize(horizontal: false, vertical: true)
