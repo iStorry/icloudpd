@@ -172,15 +172,36 @@ public final class SyncEngine: @unchecked Sendable {
                                                                          isImage: isImage, livePolicy: c.livePhotoMovFilenamePolicy)
             files.append(PlannedFile(version: version, size: size, url: url(in: c.directory, folders, name), isLivePhotoVideo: false))
         }
-        if !c.skipLivePhotos && !c.xmpSidecarOnly, isImage, let live = allVersions[c.livePhotoSize.versionSize] {
-            var name = FilenamePolicy.versionFilename(base: base, version: live, size: c.livePhotoSize.versionSize,
-                                                      isImage: true, livePolicy: c.livePhotoMovFilenamePolicy)
-            if c.livePhotoSize != .original { name = FilenamePolicy.addSuffix("-\(c.livePhotoSize.rawValue)", to: name) }
+        if !c.skipLivePhotos && !c.xmpSidecarOnly, isImage {
             let root = c.livePhotoDirectory ?? c.directory
-            files.append(PlannedFile(version: live, size: c.livePhotoSize.versionSize,
-                                     url: url(in: root, folders, name), isLivePhotoVideo: true))
+            for (size, version, suffix) in livePhotoVideos(allVersions, sizes: sizes) {
+                var name = FilenamePolicy.versionFilename(base: base, version: version, size: size,
+                                                          isImage: true, livePolicy: c.livePhotoMovFilenamePolicy)
+                if size == .liveAdjusted {
+                    // Named as a video whatever file type iCloud reports for the edit.
+                    name = FilenamePolicy.livePhotoVideoName(for: base, policy: c.livePhotoMovFilenamePolicy)
+                }
+                if let suffix { name = FilenamePolicy.addSuffix(suffix, to: name) }
+                files.append(PlannedFile(version: version, size: size, url: url(in: root, folders, name), isLivePhotoVideo: true))
+            }
         }
         return (files, missing)
+    }
+
+    /// The Live Photo videos to fetch, with a name suffix each. An edited Live Photo's video
+    /// follows the photo: with `adjusted` its edited video is downloaded, in place of the
+    /// original one, or as "-adjusted" next to it when `original` is asked for too (#42).
+    func livePhotoVideos(_ versions: [VersionSize: AssetVersion], sizes: [VersionSize])
+        -> [(size: VersionSize, version: AssetVersion, suffix: String?)] {
+        let c = configuration
+        let edited = c.livePhotoSize == .original && sizes.contains(.adjusted) ? versions[.liveAdjusted] : nil
+        if let edited, !sizes.contains(.original) { return [(.liveAdjusted, edited, nil)] }
+        var videos: [(size: VersionSize, version: AssetVersion, suffix: String?)] = []
+        if let live = versions[c.livePhotoSize.versionSize] {
+            videos.append((c.livePhotoSize.versionSize, live, c.livePhotoSize == .original ? nil : "-\(c.livePhotoSize.rawValue)"))
+        }
+        if let edited { videos.append((.liveAdjusted, edited, "-adjusted")) }
+        return videos
     }
 
     /// Where a planned file goes, or nil when it's already on disk. A different file with the
@@ -656,13 +677,20 @@ public final class SyncEngine: @unchecked Sendable {
                                                                          livePolicy: c.livePhotoMovFilenamePolicy)
             paths.append(url(in: c.directory, folders, name))
         }
-        for (size, version) in versions where size != .alternative && size != .adjusted {
+        let liveRoot = c.livePhotoDirectory ?? c.directory
+        if isImage, versions[.liveAdjusted] != nil {
+            // The edited video is saved under the video's name, or with "-adjusted" next to the original.
+            let name = FilenamePolicy.livePhotoVideoName(for: base, policy: c.livePhotoMovFilenamePolicy)
+            paths.append(url(in: liveRoot, folders, name))
+            paths.append(url(in: liveRoot, folders, FilenamePolicy.addSuffix("-adjusted", to: name)))
+        }
+        for (size, version) in versions where size != .alternative && size != .adjusted && size != .liveAdjusted {
             var name = FilenamePolicy.versionFilename(base: base, version: version, size: size, isImage: isImage,
                                                       livePolicy: c.livePhotoMovFilenamePolicy)
             if size == .liveMedium { name = FilenamePolicy.addSuffix("-medium", to: name) }
             if size == .liveThumb { name = FilenamePolicy.addSuffix("-thumb", to: name) }
             let isLive = [.liveOriginal, .liveMedium, .liveThumb].contains(size)
-            paths.append(url(in: isLive ? (c.livePhotoDirectory ?? c.directory) : c.directory, folders, name))
+            paths.append(url(in: isLive ? liveRoot : c.directory, folders, name))
         }
         return paths.flatMap { [$0, URL(fileURLWithPath: $0.path + ".xmp")] }
     }
