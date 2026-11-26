@@ -21,6 +21,17 @@ enum Theme {
 }
 
 extension View {
+    /// The floating sidebar panel in the window's top-left corner. The window buttons are moved
+    /// inside it (see `WindowButtons`), so its content starts below them.
+    func sidebarColumn(width: CGFloat) -> some View {
+        padding(.horizontal, 14)
+            .padding(.bottom, 14)
+            .padding(.top, WindowButtons.clearance)
+            .frame(width: width)
+            .frame(maxHeight: .infinity, alignment: .top)
+            .panel(cornerRadius: 18, fill: Color.white.opacity(0.035), stroke: Color.white.opacity(0.07))
+    }
+
     /// A translucent rounded panel with a hairline edge.
     func panel(cornerRadius: CGFloat = 16, fill: Color = Theme.panelFill, stroke: Color = Theme.panelStroke) -> some View {
         background(fill, in: .rect(cornerRadius: cornerRadius, style: .continuous))

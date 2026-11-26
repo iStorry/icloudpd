@@ -70,12 +70,7 @@ struct SettingsSidebar: View {
                 }
             }
         }
-        .padding(14)
-        // Clear the traffic lights, which sit over the top of the sidebar.
-        .padding(.top, 26)
-        .frame(width: 300)
-        .frame(maxHeight: .infinity, alignment: .top)
-        .panel(cornerRadius: 22)
+        .sidebarColumn(width: 300)
     }
 }
 

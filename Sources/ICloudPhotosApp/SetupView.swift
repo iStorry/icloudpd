@@ -59,7 +59,7 @@ struct SetupFlow: View {
     @State private var step: SetupStep = .folder
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: WindowButtons.margin) {
             sidebar
             stage.frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -130,12 +130,7 @@ struct SetupFlow: View {
             .buttonStyle(.plain)
             .help("Every option, for when the questions here aren't enough")
         }
-        .padding(14)
-        // Clear the traffic lights, which sit over the top of the sidebar.
-        .padding(.top, 26)
-        .frame(width: 300)
-        .frame(maxHeight: .infinity, alignment: .top)
-        .panel(cornerRadius: 22)
+        .sidebarColumn(width: 300)
         .disabled(model.isDownloading)
     }
 

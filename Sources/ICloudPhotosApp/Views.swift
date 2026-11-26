@@ -24,7 +24,9 @@ struct RootView: View {
         }
         .animation(.smooth(duration: 0.3), value: model.phase)
         .frame(minWidth: 900, minHeight: 640)
-        // The window has no title bar: the content runs to the top edge, under the traffic lights.
+        // The window has no title bar: the content runs to the top edge, and the window buttons
+        // are moved inside the panel in the top-left corner.
+        .background(WindowButtonsPlacer())
         .ignoresSafeArea()
         .tint(Theme.accent)
         .preferredColorScheme(.dark)
@@ -48,7 +50,7 @@ struct DownloadView: View {
     @State private var settingsPane: SettingsPane = .general
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: WindowButtons.margin) {
             // Setup and settings take over both columns: their steps or sections in the sidebar,
             // the chosen one beside it.
             if model.page == .setup {
@@ -70,7 +72,7 @@ struct DownloadView: View {
                 .transition(.opacity)
             }
         }
-        .padding(12)
+        .padding(WindowButtons.margin)
         .animation(.smooth(duration: 0.22), value: model.page)
         .sheet(isPresented: $showingAlbums) {
             AlbumPicker().environmentObject(model)

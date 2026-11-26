@@ -92,12 +92,7 @@ struct AppSidebar: View {
             Spacer(minLength: 0)
             account
         }
-        .padding(14)
-        // Clear the traffic lights, which sit over the top of the sidebar.
-        .padding(.top, 26)
-        .frame(width: 264)
-        .frame(maxHeight: .infinity, alignment: .top)
-        .panel(cornerRadius: 20, fill: Color.white.opacity(0.035), stroke: Color.white.opacity(0.07))
+        .sidebarColumn(width: 264)
     }
 
     private func item(_ title: String, _ symbol: String, _ page: AppModel.Page, busy: Bool = false) -> some View {

@@ -13,7 +13,8 @@ struct AuthShell<Form: View>: View {
     @ViewBuilder var form: Form
 
     var body: some View {
-        HStack(spacing: 12) {
+        // The window buttons sit inside the photo panel's top-left corner (see `WindowButtons`).
+        HStack(spacing: 0) {
             AuthPhotoPanel(headline: headline, message: message, points: points)
             form
                 .frame(maxWidth: formWidth)
@@ -21,7 +22,8 @@ struct AuthShell<Form: View>: View {
                 .frame(width: formWidth + 80)
                 .frame(maxHeight: .infinity)
         }
-        .padding(12)
+        .padding(.vertical, WindowButtons.margin)
+        .padding(.leading, WindowButtons.margin)
     }
 }
 
@@ -41,6 +43,10 @@ struct AuthPhotoPanel: View {
                                    .init(color: Theme.background.opacity(0.7), location: 0.65),
                                    .init(color: Theme.background.opacity(0.97), location: 1)],
                            startPoint: .top, endPoint: .bottom)
+            // A light shade along the top keeps the window buttons readable on bright photos.
+            LinearGradient(colors: [.black.opacity(0.35), .clear], startPoint: .top, endPoint: .bottom)
+                .frame(height: 64)
+                .frame(maxHeight: .infinity, alignment: .top)
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 10) {
                     Image(systemName: "icloud.and.arrow.down")
@@ -72,8 +78,8 @@ struct AuthPhotoPanel: View {
             .padding(isNarrow ? 28 : 36)
         }
         .onGeometryChange(for: Bool.self) { $0.size.width < 480 } action: { isNarrow = $0 }
-        .clipShape(.rect(cornerRadius: 20, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(Color.white.opacity(0.06)))
+        .clipShape(.rect(cornerRadius: 18, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(Color.white.opacity(0.07)))
         .accessibilityElement(children: .combine)
     }
 
