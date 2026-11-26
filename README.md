@@ -35,12 +35,30 @@ It's a Swift reimplementation of the open-source [icloudpd](https://github.com/i
 - macOS 26 Tahoe or later, with Xcode 26+.
 - **Settings > [your name] > iCloud > Access iCloud Data on the Web** turned on.
 
+## Download
+
+Each release on the Releases page has the app as **iCloud-Photos-Downloader-*version*.zip**: open it
+and drag the app to Applications. The app isn't notarized yet, so the first time macOS stops it; go to
+**System Settings › Privacy & Security** and click **Open Anyway**.
+
 ## Build and run
 
 ```sh
 swift run ICloudPhotos            # the app
 ./scripts/build-app.sh            # build/iCloud Photos Downloader.app and build/icloudpd-swift
+APP_VERSION=1.2.0 ./scripts/build-app.sh   # the same, stamped with a version
 ```
+
+Every pull request and push to `main` is tested and built on GitHub (`.github/workflows/build.yml`);
+the built app is a download on the run's page.
+
+## Releasing
+
+Run **Actions › Release › Run workflow** and type a version such as `1.2.0`. Once the tests and the
+build pass, the commit is tagged `v1.2.0` and a GitHub Release is published with the zipped app, the
+command-line tool, SHA-256 checksums and notes from the commits since the last release. Pushing a tag
+yourself (`git tag v1.2.0 && git push origin v1.2.0`) does the same. A version with a suffix, such as
+`1.2.0-beta.1`, becomes a pre-release.
 
 ## Command-line tool
 
