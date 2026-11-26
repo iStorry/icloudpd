@@ -46,7 +46,6 @@ enum Initials {
 
 struct DownloadView: View {
     @EnvironmentObject var model: AppModel
-    @State private var showingAlbums = false
     @State private var settingsPane: SettingsPane = .freeUp
 
     var body: some View {
@@ -68,10 +67,12 @@ struct DownloadView: View {
                 Group {
                     if model.page == .activity {
                         activityStage
+                    } else if model.page == .syncChoice {
+                        SyncChoiceStage()
                     } else if !model.hasOnboarded {
                         WelcomeStage()
                     } else {
-                        HomeStage(showingAlbums: $showingAlbums)
+                        HomeStage()
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -80,12 +81,9 @@ struct DownloadView: View {
         }
         .padding(WindowButtons.margin)
         .animation(.smooth(duration: 0.22), value: model.page)
-        .sheet(isPresented: $showingAlbums) {
-            AlbumPicker().environmentObject(model)
-        }
-        .confirmationDialog("Delete photos from iCloud?", isPresented: $model.pendingDestructiveRun) {
-            Button("Download and Delete from iCloud", role: .destructive) { model.startDownload(confirmed: true) }
-            Button("Dry Run First") { model.startDownload(dryRun: true) }
+        .confirmationDialog("Remove photos from iCloud?", isPresented: $model.pendingDestructiveRun) {
+            Button("Save Here, Then Remove from iCloud", role: .destructive) { model.startDownload(confirmed: true) }
+            Button("Preview First") { model.startDownload(dryRun: true) }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text(destructiveMessage)

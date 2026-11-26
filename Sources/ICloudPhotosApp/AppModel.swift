@@ -52,7 +52,7 @@ final class AppModel: ObservableObject {
     @Published var phase: Phase = .signedOut
     /// What the main window shows once signed in: the home page, the activity of the current or
     /// last run, the guided setup that asks one question at a time, or the page with every setting.
-    enum Page { case library, activity, setup, settings }
+    enum Page { case library, activity, syncChoice, setup, settings }
     @Published var page: Page = .library
     var isInside: Bool { phase == .signedIn || phase == .restoring }
     @Published var appleID: String = UserDefaults.standard.string(forKey: "appleID") ?? ""

@@ -95,7 +95,8 @@ struct AppSidebar: View {
     }
 
     private func item(_ title: String, _ symbol: String, _ page: AppModel.Page, busy: Bool = false) -> some View {
-        let isOn = model.page == page
+        // The Sync Now question belongs to Home.
+        let isOn = model.page == page || (page == .library && model.page == .syncChoice)
         return Button { model.page = page } label: {
             HStack(spacing: 10) {
                 Image(systemName: symbol).frame(width: 20)
@@ -229,9 +230,6 @@ struct AppSidebar: View {
 /// The home page: the newest photos behind where the library stands, and the setup that matters most below.
 struct HomeStage: View {
     @EnvironmentObject var model: AppModel
-    @Binding var showingAlbums: Bool
-    /// Room for the three cards side by side; narrower windows put Include on a row of its own.
-    @State private var isWide = true
 
     var body: some View {
         VStack(spacing: 12) {
@@ -239,19 +237,12 @@ struct HomeStage: View {
             if let notice = model.notice {
                 ErrorBanner(message: notice)
             }
-            if !model.config.dryRun && model.config.deletesFromICloud {
-                Label("This setup deletes photos from iCloud after downloading them. Change it in Settings > Sync.",
-                      systemImage: "exclamationmark.triangle.fill")
-                    .font(.system(size: 12))
-                    .foregroundStyle(Theme.warning)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(12)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .panel(cornerRadius: 14, fill: Theme.warning.opacity(0.08), stroke: Theme.warning.opacity(0.35))
+            HStack(alignment: .top, spacing: 12) {
+                planCard
+                folderCard
             }
-            cards
+            .fixedSize(horizontal: false, vertical: true)
         }
-        .onGeometryChange(for: Bool.self) { $0.size.width >= 760 } action: { isWide = $0 }
     }
 
     // MARK: Hero
@@ -367,16 +358,17 @@ struct HomeStage: View {
                 }
                 .buttonStyle(HeroButtonStyle())
             } else {
-                Button { model.startDownload(dryRun: true) } label: {
-                    Label("Dry Run", systemImage: "eye")
-                }
-                .buttonStyle(HeroButtonStyle(isPrimary: false))
-                .help("See what would be downloaded, moved or deleted, without changing anything")
-                Button { model.startDownload() } label: {
-                    Label(model.config.albums.isEmpty ? "Sync Now" : "Sync Albums", systemImage: "arrow.down.to.line")
+                // Sync Now asks first: the same as last time, or something different.
+                Button { model.page = .syncChoice } label: {
+                    Label("Sync Now", systemImage: "arrow.down.to.line")
                 }
                 .buttonStyle(HeroButtonStyle())
                 .keyboardShortcut(.defaultAction)
+                Button { model.startDownload(dryRun: true) } label: {
+                    Label("Preview", systemImage: "eye")
+                }
+                .buttonStyle(HeroButtonStyle(isPrimary: false))
+                .help("See what Sync Now would do, without changing anything")
             }
         }
         .fixedSize()
@@ -395,161 +387,62 @@ struct HomeStage: View {
 
     // MARK: Cards
 
-    private var cards: some View {
-        Group {
-            if isWide {
-                HStack(alignment: .top, spacing: 12) {
-                    saveCard
-                    fromCard
-                    includeCard
-                }
-                .fixedSize(horizontal: false, vertical: true)
-            } else {
-                VStack(spacing: 12) {
-                    HStack(alignment: .top, spacing: 12) {
-                        saveCard
-                        fromCard
-                    }
-                    .fixedSize(horizontal: false, vertical: true)
-                    includeChips
+    /// What happens on Sync Now, in a sentence anyone can read.
+    private var planCard: some View {
+        let removing = model.config.deletesFromICloud
+        return HomeCard(title: "Your plan") {
+            CardLink(title: "Change") { model.page = .setup }
+        } content: {
+            HStack(alignment: .top, spacing: 14) {
+                IconTile(systemName: removing ? "icloud.slash" : "icloud",
+                         foreground: removing ? Theme.warning : Theme.accentSoft,
+                         background: (removing ? Theme.warning : Theme.accent).opacity(0.16))
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(PlanWords.what(model.config))
+                        .font(.system(size: 14, weight: .medium))
+                        .lineSpacing(2)
                         .fixedSize(horizontal: false, vertical: true)
+                    Text(PlanWords.when(model.schedule, hour: model.scheduleHour))
+                        .font(.system(size: 13))
+                        .foregroundStyle(Theme.secondary)
                 }
             }
         }
-        .disabled(model.isDownloading)
-        .opacity(model.isDownloading ? 0.5 : 1)
     }
 
-    private var saveCard: some View {
-        HomeCard(title: "Save to") {
+    /// Where the photos are, and a way to open the folder.
+    private var folderCard: some View {
+        HomeCard(title: "Your photos") {
             if model.directory != nil {
-                CardLink(title: "Show") { model.openDirectory() }
+                CardLink(title: "Open Folder") { model.openDirectory() }
             }
-            CardLink(title: "Change") { model.chooseDirectory() }
         } content: {
-            HStack(spacing: 12) {
+            HStack(alignment: .top, spacing: 14) {
                 IconTile(systemName: "folder.fill", foreground: Theme.accentSoft, background: Theme.accent.opacity(0.18))
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(model.directory?.lastPathComponent ?? "No folder chosen")
-                        .font(.system(size: 14, weight: .semibold))
-                    Text(model.directory.map { ($0.path as NSString).abbreviatingWithTildeInPath } ?? "Choose where photos go")
-                        .font(.system(size: 12))
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(model.directory?.lastPathComponent ?? "No folder yet")
+                        .font(.system(size: 14, weight: .medium))
+                        .lineLimit(1)
+                    Text(folderLine)
+                        .font(.system(size: 13))
                         .foregroundStyle(Theme.secondary)
-                        .truncationMode(.middle)
-                }
-                .lineLimit(1)
-            }
-            CardDivider()
-            ViewThatFits(in: .horizontal) {
-                HStack {
-                    Text("Folders").foregroundStyle(Color(white: 0.66))
-                    Spacer(minLength: 8)
-                    folderPicker
-                }
-                folderPicker
-            }
-        }
-    }
-
-    private var folderPicker: some View {
-        Picker("Folders", selection: $model.config.folderStructure) {
-            ForEach(FolderStructure.allCases, id: \.self) { Text($0.label).tag($0.rawValue) }
-            if FolderStructure(rawValue: model.config.folderStructure) == nil {
-                Text("Custom").tag(model.config.folderStructure)
-            }
-        }
-        .labelsHidden()
-        .pickerStyle(.menu)
-        .tint(.white)
-        .fixedSize()
-    }
-
-    private var fromCard: some View {
-        HomeCard(title: "From") {
-            CardLink(title: "Choose") { showingAlbums = true }
-                .disabled(model.phase != .signedIn)
-        } content: {
-            HStack(spacing: 12) {
-                IconTile(systemName: "icloud", foreground: Color(white: 0.9), background: Color.white.opacity(0.07))
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(albumSummary)
-                        .font(.system(size: 14, weight: .semibold))
-                    Text(model.libraryLabel(currentLibrary))
-                        .font(.system(size: 12))
-                        .foregroundStyle(Theme.secondary)
-                }
-                .lineLimit(1)
-            }
-            CardDivider()
-            if model.libraries.count > 1 {
-                HStack {
-                    Text("Library").foregroundStyle(Color(white: 0.66))
-                    Spacer(minLength: 8)
-                    Picker("Library", selection: libraryBinding) {
-                        ForEach(model.libraries, id: \.self) { Text(model.libraryLabel($0)).tag($0) }
+                        .fixedSize(horizontal: false, vertical: true)
+                    if model.directory == nil {
+                        Button("Choose a Folder…") { model.chooseDirectory() }
+                            .buttonStyle(PillButtonStyle(height: 30))
+                            .padding(.top, 2)
                     }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                    .tint(.white)
-                    .fixedSize()
                 }
             }
-            HStack {
-                Text("After download").foregroundStyle(Color(white: 0.66))
-                Spacer(minLength: 8)
-                Text(model.config.deletesFromICloud ? "Delete in iCloud" : "Keep in iCloud")
-            }
-            .lineLimit(1)
         }
     }
 
-    private var includeCard: some View {
-        HomeCard(title: "Include") {
-            EmptyView()
-        } content: {
-            VStack(spacing: 6) {
-                IncludeRow(title: "Photos", isOn: inverted(\.skipPhotos))
-                IncludeRow(title: "Videos", isOn: inverted(\.skipVideos))
-                IncludeRow(title: "Live Photo videos", isOn: inverted(\.skipLivePhotos))
-                IncludeRow(title: "Screenshots", isOn: inverted(\.skipScreenshots))
-            }
-        }
-    }
-
-    private var includeChips: some View {
-        HomeCard(title: "Include") {
-            EmptyView()
-        } content: {
-            HStack(spacing: 8) {
-                IncludeChip(title: "Photos", isOn: inverted(\.skipPhotos))
-                IncludeChip(title: "Videos", isOn: inverted(\.skipVideos))
-                IncludeChip(title: "Live Photo videos", isOn: inverted(\.skipLivePhotos))
-                IncludeChip(title: "Screenshots", isOn: inverted(\.skipScreenshots))
-            }
-        }
-    }
-
-    private var currentLibrary: String { model.config.library ?? model.libraries.first ?? "PrimarySync" }
-
-    private var albumSummary: String {
-        switch model.config.albums.count {
-        case 0: return "All Photos"
-        case 1: return model.config.albums[0]
-        default: return "\(model.config.albums.count) albums"
-        }
-    }
-
-    private var libraryBinding: Binding<String> {
-        Binding(get: { currentLibrary },
-                set: { name in
-                    model.config.library = name
-                    model.config.albums = []
-                    Task { await model.loadAlbums() }
-                })
-    }
-
-    private func inverted(_ key: WritableKeyPath<SyncConfiguration, Bool>) -> Binding<Bool> {
-        Binding(get: { !model.config[keyPath: key] }, set: { model.config[keyPath: key] = !$0 })
+    private var folderLine: String {
+        guard model.directory != nil else { return "Pick where your photos should go." }
+        var parts: [String] = []
+        if let items = model.lastRunItems, items > 0 { parts.append("\(items.formatted()) photos and videos") }
+        if let glance = model.glance { parts.append(AppSidebar.size(glance.bytes)) }
+        return parts.isEmpty ? "On this Mac" : parts.joined(separator: " · ")
     }
 }
 
@@ -737,23 +630,6 @@ struct IconTile: View {
     }
 }
 
-/// A label and a small switch, for the Include card.
-struct IncludeRow: View {
-    let title: String
-    @Binding var isOn: Bool
-
-    var body: some View {
-        HStack {
-            Text(title).lineLimit(1)
-            Spacer(minLength: 8)
-            Toggle(title, isOn: $isOn)
-                .labelsHidden()
-                .toggleStyle(.switch)
-                .controlSize(.small)
-        }
-        .frame(minHeight: 24)
-    }
-}
 /// A capsule that is on or off, for the Include card when it runs along the bottom.
 struct IncludeChip: View {
     let title: String

@@ -116,6 +116,40 @@ struct SetupAnswers {
     }
 }
 
+/// The current plan in plain sentences, for people who never open Settings.
+enum PlanWords {
+    /// "Photos older than 1 year are saved on this Mac, then removed from iCloud."
+    static func what(_ c: SyncConfiguration) -> String {
+        var text: String
+        if c.deletesFromICloud {
+            let age = c.keepICloudRecentDays ?? 0
+            text = age > 0
+                ? "Photos older than \(RemovalAge.label(age).lowercased()) are saved on this Mac, then removed from iCloud."
+                : "Photos are saved on this Mac, then removed from iCloud."
+        } else {
+            text = "Photos are saved on this Mac. iCloud stays as it is."
+        }
+        if c.skipCreatedBefore != nil || c.skipCreatedAfter != nil {
+            text += " Only ones " + PhotoSettings.rangeText(c).lowercased() + "."
+        }
+        if !c.albums.isEmpty {
+            text += c.albums.count == 1 ? " Only from the album \(c.albums[0])." : " Only from \(c.albums.count) albums."
+        }
+        return text
+    }
+
+    /// "Runs by itself every night at 2:00."
+    static func when(_ schedule: ScheduleInterval, hour: Int) -> String {
+        switch schedule {
+        case .off: return "Runs only when you press Sync Now."
+        case .daily:
+            let time = DateComponents(calendar: .current, hour: hour, minute: 0).date?.formatted(date: .omitted, time: .shortened) ?? "\(hour):00"
+            return "Runs by itself every night at \(time)."
+        default: return "Runs by itself \(schedule.label.lowercased())."
+        }
+    }
+}
+
 /// How old a photo must be before it leaves iCloud.
 enum RemovalAge {
     static let choices = [0, 30, 91, 182, 365, 730]
