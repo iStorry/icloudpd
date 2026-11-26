@@ -54,6 +54,8 @@ final class AppModel: ObservableObject {
     /// last run, the guided setup that asks one question at a time, or the page with every setting.
     enum Page { case library, activity, syncChoice, setup, settings }
     @Published var page: Page = .library
+    /// The section Settings shows, chosen from its sub-menu in the sidebar.
+    @Published var settingsPane: SettingsPane = .freeUp
     var isInside: Bool { phase == .signedIn || phase == .restoring }
     @Published var appleID: String = UserDefaults.standard.string(forKey: "appleID") ?? ""
     @Published var domain: ICloudDomain = ICloudDomain(rawValue: UserDefaults.standard.string(forKey: "domain") ?? "") ?? .com

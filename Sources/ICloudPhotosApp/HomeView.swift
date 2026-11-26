@@ -68,9 +68,15 @@ struct LibraryGlance: @unchecked Sendable {
 
 // MARK: Sidebar
 
-/// The main window's sidebar: the app, its pages, the folder's size and the account.
+/// The main window's sidebar: the app, its pages with Settings' sections under it, the disk space
+/// and the account.
 struct AppSidebar: View {
     @EnvironmentObject var model: AppModel
+    /// One highlight that slides from item to item instead of each item drawing its own.
+    @Namespace private var highlight
+
+    private var inSettings: Bool { model.page == .settings }
+    private static let motion = Animation.snappy(duration: 0.3, extraBounce: 0)
 
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
@@ -87,9 +93,21 @@ struct AppSidebar: View {
             .padding(.leading, 4)
 
             VStack(spacing: 2) {
-                item("Home", "house", .library)
-                item("Activity", "waveform.path.ecg", .activity, busy: model.isDownloading)
-                item("Settings", "slider.horizontal.3", .settings)
+                item("Home", "house", isOn: model.page == .library || model.page == .syncChoice) { go(.library) }
+                item("Activity", "waveform.path.ecg", isOn: model.page == .activity, busy: model.isDownloading) { go(.activity) }
+                item("Settings", "slider.horizontal.3", isOn: false, isOpen: inSettings) { go(.settings) }
+
+                // Settings' sections: always there, folded to no height when Settings isn't open,
+                // so opening and closing is one smooth change of height.
+                VStack(spacing: 1) {
+                    ForEach(SettingsPane.allCases) { subItem($0) }
+                }
+                .padding(.top, inSettings ? 2 : 0)
+                .frame(height: inSettings ? nil : 0, alignment: .top)
+                .clipped()
+                .opacity(inSettings ? 1 : 0)
+                .allowsHitTesting(inSettings)
+                .accessibilityHidden(!inSettings)
             }
 
             Spacer(minLength: 0)
@@ -100,23 +118,75 @@ struct AppSidebar: View {
             }
         }
         .sidebarColumn(width: 264)
+        .animation(Self.motion, value: model.page)
+        .animation(Self.motion, value: model.settingsPane)
     }
 
-    private func item(_ title: String, _ symbol: String, _ page: AppModel.Page, busy: Bool = false) -> some View {
-        // The Sync Now question belongs to Home.
-        let isOn = model.page == page || (page == .library && model.page == .syncChoice)
-        return Button { model.page = page } label: {
+    /// A plain change, not an animated one: only the sidebar animates it (see `body`), so the
+    /// page beside it swaps at once instead of fading into the old one.
+    private func go(_ page: AppModel.Page) {
+        model.page = page
+    }
+
+    private func item(_ title: String, _ symbol: String, isOn: Bool, isOpen: Bool = false, busy: Bool = false,
+                      action: @escaping () -> Void) -> some View {
+        Button(action: action) {
             HStack(spacing: 10) {
                 Image(systemName: symbol).frame(width: 20)
                 Text(title)
                 Spacer(minLength: 0)
                 if busy { RunBadge(fraction: model.runFraction) }
+                if title == "Settings" {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Theme.secondary)
+                        .rotationEffect(.degrees(isOpen ? 90 : 0))
+                }
+            }
+            .font(.system(size: 13, weight: isOn || isOpen ? .medium : .regular))
+            .foregroundStyle(isOn || isOpen ? Color.primary : Color(white: 0.66))
+            .padding(.horizontal, 10)
+            .frame(height: 36)
+            .background {
+                if isOn {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color.white.opacity(0.08))
+                        .matchedGeometryEffect(id: "selection", in: highlight)
+                }
+            }
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(isOn ? .isSelected : [])
+    }
+
+    /// One section of Settings, indented under it.
+    private func subItem(_ pane: SettingsPane) -> some View {
+        let isOn = inSettings && model.settingsPane == pane
+        return Button {
+            model.settingsPane = pane
+            model.page = .settings
+        } label: {
+            HStack(spacing: 9) {
+                Image(systemName: pane.symbol)
+                    .font(.system(size: 12))
+                    .foregroundStyle(isOn ? Theme.accentSoft : Color(white: 0.55))
+                    .frame(width: 18)
+                Text(pane.title)
+                Spacer(minLength: 0)
             }
             .font(.system(size: 13, weight: isOn ? .medium : .regular))
             .foregroundStyle(isOn ? Color.primary : Color(white: 0.66))
-            .padding(.horizontal, 10)
-            .frame(height: 36)
-            .background(isOn ? Color.white.opacity(0.08) : Color.clear, in: .rect(cornerRadius: 10, style: .continuous))
+            .padding(.leading, 30)
+            .padding(.trailing, 10)
+            .frame(height: 32)
+            .background {
+                if isOn {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color.white.opacity(0.08))
+                        .matchedGeometryEffect(id: "selection", in: highlight)
+                }
+            }
             .contentShape(.rect)
         }
         .buttonStyle(.plain)

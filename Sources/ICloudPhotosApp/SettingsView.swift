@@ -31,123 +31,12 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .freeUp: return "icloud.slash"
         case .photos: return "photo.on.rectangle"
         case .general: return "clock"
-        case .advanced: return "slider.horizontal.3"
-        }
-    }
-
-    var tint: Color {
-        switch self {
-        case .freeUp: return Theme.accent
-        case .photos: return Color(red: 0.88, green: 0.54, blue: 0.17)
-        case .general: return Color(white: 0.43)
-        case .advanced: return Color(white: 0.3)
-        }
-    }
-
-    /// Words the search field matches, besides the title.
-    var keywords: String {
-        switch self {
-        case .freeUp: return "delete remove keep recent days older safety preview recently deleted storage space mac auto-delete prune"
-        case .photos: return "library albums dates taken from to include photos videos live screenshots quality size original folder layout"
-        case .general: return "account sign out schedule automatic night time login menu bar notifications"
-        case .advanced: return "parallel activity log dry run sizes raw naming unicode metadata exif xmp skip recent until found pattern delete list data protection indexing suffix command line"
+        case .advanced: return "gearshape.2"
         }
     }
 }
 
-/// The settings page's sidebar: the way back, search, the sections and the easy setup.
-struct SettingsSidebar: View {
-    @EnvironmentObject var model: AppModel
-    @Binding var pane: SettingsPane
-    @State private var query = ""
-
-    private var matches: [SettingsPane] {
-        let words = query.lowercased().split(separator: " ")
-        guard !words.isEmpty else { return SettingsPane.allCases }
-        return SettingsPane.allCases.filter { item in
-            let text = (item.title + " " + item.keywords).lowercased()
-            return words.allSatisfy { text.contains($0) }
-        }
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack(spacing: 10) {
-                Button { model.page = .library } label: { CircleIcon(systemName: "chevron.left") }
-                    .buttonStyle(.plain)
-                    .keyboardShortcut(.cancelAction)
-                    .help("Back to Home")
-                    .accessibilityLabel("Back to Home")
-                Text("Settings")
-                    .font(.system(size: 20, weight: .semibold))
-                    .tracking(-0.3)
-            }
-            .padding(.leading, 2)
-
-            HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass").foregroundStyle(Theme.secondary)
-                TextField("Search settings", text: $query)
-                    .textFieldStyle(.plain)
-                    .onSubmit { if let first = matches.first { pane = first } }
-            }
-            .padding(.horizontal, 10)
-            .frame(height: 32)
-            .panel(cornerRadius: 9, fill: Theme.fieldFill, stroke: Color.white.opacity(0.08))
-
-            VStack(spacing: 2) {
-                ForEach(matches) { item in
-                    let isOn = pane == item
-                    Button { pane = item } label: {
-                        HStack(spacing: 10) {
-                            Image(systemName: item.symbol)
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(.white)
-                                .frame(width: 24, height: 24)
-                                .background(item.tint, in: .rect(cornerRadius: 7, style: .continuous))
-                            Text(item.title)
-                            Spacer(minLength: 0)
-                        }
-                        .font(.system(size: 13, weight: isOn ? .medium : .regular))
-                        .foregroundStyle(isOn ? Color.primary : Color(white: 0.8))
-                        .padding(.horizontal, 8)
-                        .frame(height: 36)
-                        .background(isOn ? Theme.accent.opacity(0.2) : Color.clear, in: .rect(cornerRadius: 10, style: .continuous))
-                        .contentShape(.rect)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityAddTraits(isOn ? .isSelected : [])
-                }
-                if matches.isEmpty {
-                    Text("No settings match \"\(query)\".")
-                        .font(.system(size: 12))
-                        .foregroundStyle(Theme.secondary)
-                        .padding(.horizontal, 8)
-                }
-            }
-
-            Spacer(minLength: 0)
-
-            Button { model.page = .setup } label: {
-                HStack(spacing: 10) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Run setup again").font(.system(size: 13, weight: .medium))
-                        Text("The three easy questions").font(.system(size: 12)).foregroundStyle(Theme.secondary)
-                    }
-                    Spacer(minLength: 0)
-                    Image(systemName: "chevron.right").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.secondary)
-                }
-                .padding(10)
-                .background(Color.white.opacity(0.04), in: .rect(cornerRadius: 12, style: .continuous))
-                .contentShape(.rect)
-            }
-            .buttonStyle(.plain)
-            .disabled(model.isDownloading)
-        }
-        .sidebarColumn(width: 264)
-    }
-}
-
-/// The chosen section, beside the sidebar.
+/// The chosen section of Settings, beside the main sidebar.
 struct SettingsStage: View {
     @EnvironmentObject var model: AppModel
     @Binding var pane: SettingsPane
@@ -156,13 +45,22 @@ struct SettingsStage: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(pane.title)
-                        .font(.system(size: 30, weight: .bold))
-                        .tracking(-0.9)
-                    Text(pane.summary)
-                        .font(.system(size: 14))
-                        .foregroundStyle(Theme.secondary)
+                HStack(alignment: .top, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(pane.title)
+                            .font(.system(size: 30, weight: .bold))
+                            .tracking(-0.9)
+                        Text(pane.summary)
+                            .font(.system(size: 14))
+                            .foregroundStyle(Theme.secondary)
+                    }
+                    Spacer(minLength: 8)
+                    Button { model.page = .setup } label: {
+                        Label("Easy Setup", systemImage: "wand.and.stars")
+                    }
+                    .buttonStyle(PillButtonStyle(kind: .secondary, height: 32))
+                    .help("Answer the three easy questions again")
+                    .disabled(model.isDownloading)
                 }
 
                 if model.isDownloading {

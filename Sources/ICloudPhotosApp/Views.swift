@@ -46,41 +46,30 @@ enum Initials {
 
 struct DownloadView: View {
     @EnvironmentObject var model: AppModel
-    @State private var settingsPane: SettingsPane = .freeUp
 
     var body: some View {
         HStack(spacing: WindowButtons.margin) {
-            // Setup and settings take over both columns: their steps or sections in the sidebar,
-            // the chosen one beside it.
+            // The easy setup takes over both columns: its steps in the sidebar, one question beside
+            // them. Every other page keeps the main sidebar, Settings included.
             if model.page == .setup {
                 SetupFlow()
-                    .transition(.opacity)
-            } else if model.page == .settings {
-                SettingsSidebar(pane: $settingsPane)
-                    .transition(.opacity)
-                SettingsStage(pane: $settingsPane)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .transition(.opacity)
             } else {
                 AppSidebar()
-                    .transition(.opacity)
                 Group {
-                    if model.page == .activity {
-                        activityStage
-                    } else if model.page == .syncChoice {
-                        SyncChoiceStage()
-                    } else if !model.hasOnboarded {
-                        WelcomeStage()
-                    } else {
-                        HomeStage()
+                    switch model.page {
+                    case .activity: activityStage
+                    case .settings: SettingsStage(pane: $model.settingsPane)
+                    case .syncChoice: SyncChoiceStage()
+                    default:
+                        if model.hasOnboarded { HomeStage() } else { WelcomeStage() }
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .transition(.opacity)
+                // A new page replaces the old one at once. Only the sidebar animates the move:
+                // fading two whole pages into each other is what looked jumpy.
             }
         }
         .padding(WindowButtons.margin)
-        .animation(.smooth(duration: 0.22), value: model.page)
         .confirmationDialog("Remove photos from iCloud?", isPresented: $model.pendingDestructiveRun) {
             Button("Save Here, Then Remove from iCloud", role: .destructive) { model.startDownload(confirmed: true) }
             Button("Preview First") { model.startDownload(dryRun: true) }
@@ -101,7 +90,7 @@ struct DownloadView: View {
                 Text("Nothing has run yet")
                     .font(.system(size: 24, weight: .semibold))
                     .tracking(-0.5)
-                Text("Start a sync or a dry run from Home, and its progress and activity show here.")
+                Text("Press Sync Now or Preview on Home, and how it's going shows here.")
                     .font(.system(size: 14))
                     .foregroundStyle(Theme.secondary)
                     .multilineTextAlignment(.center)
