@@ -257,9 +257,7 @@ struct SetupFlow: View {
     private func dateField(_ title: String, _ date: Binding<Date>) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title).font(.system(size: 12, weight: .medium)).foregroundStyle(Theme.secondary)
-            DatePicker(title, selection: date, in: ...Date(), displayedComponents: .date)
-                .labelsHidden()
-                .datePickerStyle(.compact)
+            DateButton(date: date, label: title)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }

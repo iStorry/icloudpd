@@ -183,4 +183,93 @@ struct SettingRowStyle: LabeledContentStyle {
         .frame(maxWidth: .infinity, minHeight: 50, alignment: .leading)
     }
 }
+// MARK: Dates and numbers
+
+/// A date as a pill ("26 Nov 2016"). Clicking it opens the system's calendar in a popover, so the
+/// calendar never covers the rows around it.
+struct DateButton: View {
+    @Binding var date: Date
+    var range: PartialRangeThrough<Date> = ...Date()
+    var label: String?
+    @State private var picking = false
+
+    var body: some View {
+        Button { picking = true } label: {
+            Label(date.formatted(date: .abbreviated, time: .omitted), systemImage: "calendar")
+                .monospacedDigit()
+        }
+        .buttonStyle(PillButtonStyle(kind: .secondary, height: 30))
+        .fixedSize()
+        .accessibilityLabel(label.map { "\($0), \(date.formatted(date: .long, time: .omitted))" }
+                            ?? date.formatted(date: .long, time: .omitted))
+        .popover(isPresented: $picking, arrowEdge: .bottom) {
+            DatePicker(label ?? "Date", selection: $date, in: range, displayedComponents: .date)
+                .datePickerStyle(.graphical)
+                .labelsHidden()
+                .padding(14)
+        }
+    }
+}
+
+/// A small whole number between a minus and a plus, in one capsule. VoiceOver adjusts it like a
+/// stepper.
+struct NumberStepper: View {
+    let title: String
+    @Binding var value: Int
+    let range: ClosedRange<Int>
+
+    var body: some View {
+        HStack(spacing: 0) {
+            step("minus", by: -1).disabled(value <= range.lowerBound)
+            Text(value.formatted())
+                .font(.system(size: 14, weight: .semibold))
+                .monospacedDigit()
+                .frame(minWidth: 30)
+                .contentTransition(.numericText())
+            step("plus", by: 1).disabled(value >= range.upperBound)
+        }
+        .padding(2)
+        .background(Theme.fieldFill, in: .capsule)
+        .overlay(Capsule().strokeBorder(Color.white.opacity(0.1)))
+        .animation(.snappy(duration: 0.2), value: value)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(title)
+        .accessibilityValue(value.formatted())
+        .accessibilityAdjustableAction { direction in
+            switch direction {
+            case .increment: value = min(value + 1, range.upperBound)
+            case .decrement: value = max(value - 1, range.lowerBound)
+            @unknown default: break
+            }
+        }
+    }
+
+    private func step(_ symbol: String, by delta: Int) -> some View {
+        Button { value = min(max(value + delta, range.lowerBound), range.upperBound) } label: {
+            Image(systemName: symbol)
+                .font(.system(size: 11, weight: .bold))
+                .frame(width: 28, height: 26)
+                .contentShape(.capsule)
+        }
+        .buttonStyle(StepButtonStyle())
+    }
+
+    /// The minus and plus: plain until pressed, then a light capsule.
+    private struct StepButtonStyle: ButtonStyle {
+        func makeBody(configuration: Configuration) -> some View {
+            StepButton(configuration: configuration)
+        }
+
+        private struct StepButton: View {
+            let configuration: Configuration
+            @Environment(\.isEnabled) private var isEnabled
+
+            var body: some View {
+                configuration.label
+                    .foregroundStyle(isEnabled ? Color.primary : Color.white.opacity(0.25))
+                    .background(Color.white.opacity(configuration.isPressed ? 0.12 : 0), in: .capsule)
+            }
+        }
+    }
+}
 #endif

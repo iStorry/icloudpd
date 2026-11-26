@@ -216,11 +216,7 @@ struct SettingStepper: View {
 
     var body: some View {
         SettingRow(title: title, detail: detail) {
-            Text(value.formatted())
-                .monospacedDigit()
-                .foregroundStyle(Theme.secondary)
-            Stepper(title, value: $value, in: range)
-                .labelsHidden()
+            NumberStepper(title: title, value: $value, range: range)
         }
     }
 }
@@ -516,10 +512,7 @@ struct PhotoSettings: View {
     }
 
     private func datePicker(_ date: Binding<Date>) -> some View {
-        DatePicker("", selection: date, in: ...Date(), displayedComponents: .date)
-            .labelsHidden()
-            .datePickerStyle(.compact)
-            .fixedSize()
+        DateButton(date: date)
     }
 
     /// "Any time", "Taken before 26 Nov 2025", "Taken 3 Jan 2015 to 26 Nov 2025".
