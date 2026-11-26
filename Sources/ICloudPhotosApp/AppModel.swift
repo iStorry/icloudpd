@@ -334,8 +334,12 @@ final class AppModel: ObservableObject {
         guard let account else { throw ICloudError.passwordRequired }
         if adpWebAccess {
             append("Asking for web access to your Advanced Data Protection data…")
-            try await account.requestWebAccess { [weak self] in
+            let unlocked = try await account.requestWebAccess { [weak self] in
                 Task { @MainActor in self?.append("Approve the iCloud web access request on your iPhone, iPad or Mac.") }
+            }
+            if !unlocked {
+                append("iCloud didn't confirm web access to your photos, so they may not open. If they don't, sign out and sign in again.",
+                       isError: true)
             }
         }
         let service = try await account.photos(ignoreIndexingState: config.ignoreIndexingState)

@@ -353,8 +353,11 @@ public final class ICloudAccount: @unchecked Sendable {
     /// Replays the icloud.com sequence that unlocks data protected by Advanced Data Protection
     /// (`--adp-web-access`). The first time, Apple shows an approval request on your devices.
     /// - Parameter waiting: called once when the approval prompt has been sent.
+    /// - Returns: false when iCloud never confirmed the unlock (`requestPCS` didn't report success).
+    ///   Listing photos may then fail with "could not decrypt" errors.
+    @discardableResult
     public func requestWebAccess(appName: String = "photos", timeout: TimeInterval = 120,
-                                 waiting: (@Sendable () -> Void)? = nil) async throws {
+                                 waiting: (@Sendable () -> Void)? = nil) async throws -> Bool {
         let workflow = ["workflowUuid": UUID().uuidString.uppercased()]
         var components = URLComponents()
         components.queryItems = [URLQueryItem(name: "dsid", value: dsid ?? ""),
@@ -386,12 +389,16 @@ public final class ICloudAccount: @unchecked Sendable {
         var pcs: [String: Any] = ["appName": appName, "isFinalAttempt": false, "derivedFromUserAction": true]
         pcs.merge(workflow) { $1 }
         var result = try await call("POST", "requestPCS", pcs)
-        for _ in 0..<10 where result["status"] as? String != "success" {
-            try await Task.sleep(nanoseconds: 3_000_000_000)
+        for _ in 0..<ICloudAccount.pcsAttempts where result["status"] as? String != "success" {
+            try await Task.sleep(nanoseconds: ICloudAccount.pcsRetryDelay)
             pcs["derivedFromUserAction"] = false
             result = try await call("POST", "requestPCS", pcs)
         }
+        return result["status"] as? String == "success"
     }
+
+    static let pcsAttempts = 10
+    nonisolated(unsafe) static var pcsRetryDelay: UInt64 = 3_000_000_000
 
     // MARK: Services
 
