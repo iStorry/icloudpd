@@ -47,6 +47,11 @@ public enum ICloudError: LocalizedError, Equatable {
             if code == "ACCESS_DENIED" {
                 return "iCloud denied access (\(reason)). Check that \"Access iCloud Data on the Web\" is on, and that Advanced Data Protection is off."
             }
+            if ICloudError.isDecryptFailure(reason) {
+                return "iCloud couldn't decrypt your photos for this session (\(reason)). This happens when Advanced Data Protection is on: "
+                    + "turn on web access for Advanced Data Protection (--adp-web-access in the command-line tool) and approve the "
+                    + "request on your iPhone, iPad or Mac. If it's already on, sign out and sign in again."
+            }
             return "iCloud error \(code): \(reason)"
         case .unexpectedResponse(let what):
             return "Unexpected response from iCloud: \(what)"
@@ -59,5 +64,11 @@ public enum ICloudError: LocalizedError, Equatable {
         case .invalidOption(let reason):
             return reason
         }
+    }
+
+    /// CloudKit's answer when the session lacks the Advanced Data Protection keys:
+    /// "could not decrypt bytes" or "could not decrypt pcs cookie" (INTERNAL_ERROR).
+    static func isDecryptFailure(_ reason: String) -> Bool {
+        reason.range(of: "could not decrypt", options: .caseInsensitive) != nil
     }
 }
