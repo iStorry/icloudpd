@@ -50,7 +50,7 @@ APP_VERSION=1.2.0 ./scripts/build-app.sh   # the same, stamped with a version
 ```
 
 Every pull request and push to `main` is tested and built on GitHub (`.github/workflows/build.yml`);
-the built app is a download on the run's page.
+the built app is a download on the run's page for a week, when the account has artifact space left.
 
 ## Releasing
 

@@ -47,7 +47,10 @@ jobs:
         working-directory: build
         run: ditto -c -k --keepParent "iCloud Photos Downloader.app" "iCloud-Photos-Downloader.zip"
 
+      # The download is a convenience, so a full artifact quota (it's shared by all of the account's
+      # private repos) shows as a warning instead of failing the check. Tests and build decide pass/fail.
       - name: Keep the app and command-line tool
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: iCloud-Photos-Downloader-${{ github.sha }}
@@ -55,4 +58,4 @@ jobs:
             build/iCloud-Photos-Downloader.zip
             build/icloudpd-swift
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 7
